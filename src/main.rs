@@ -1,13 +1,14 @@
 mod app;
 mod cli;
 mod diff;
+mod highlight;
 mod ui;
 
 use std::{io, time::Duration};
 
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -53,9 +54,25 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         }
         terminal.draw(|frame| ui::render(frame, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-        {
+        if event::poll(Duration::from_millis(16))? {
+            let mut latest_key = None;
+
+            loop {
+                if let Event::Key(key) = event::read()?
+                    && key.kind == KeyEventKind::Press
+                {
+                    latest_key = Some(key);
+                }
+
+                if !event::poll(Duration::from_millis(0))? {
+                    break;
+                }
+            }
+
+            let Some(key) = latest_key else {
+                continue;
+            };
+
             let action = handle_key_event(&mut app, key);
             let viewport_area = terminal.get_frame().area();
             app.scroll = app.scroll.min(ui::max_scroll(&app, viewport_area));

@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 use crate::diff::{DiffFile, DiffLine};
+use crate::highlight::{DiffKind, FileHighlighter};
 
 #[derive(Clone, Copy)]
 struct HunkRange {
@@ -307,6 +308,7 @@ fn inline_session_lines<'a>(app: &'a App, scroll: u16, width: usize) -> Vec<Line
     let mut lines = Vec::new();
 
     for (file_index, file) in app.session.files.iter().enumerate() {
+        let mut highlighter = FileHighlighter::new(&file.path);
         lines.push(file_separator_line(width));
         lines.push(file_header_line(file, file_index == app.selected_file));
 
@@ -320,13 +322,36 @@ fn inline_session_lines<'a>(app: &'a App, scroll: u16, width: usize) -> Vec<Line
                         old_lineno,
                         new_lineno,
                         text,
-                    } => prefixed_line(" ", Some(*old_lineno), Some(*new_lineno), text, None),
-                    DiffLine::Added { new_lineno, text } => {
-                        prefixed_line("+", None, Some(*new_lineno), text, Some(Color::Green))
-                    }
-                    DiffLine::Removed { old_lineno, text } => {
-                        prefixed_line("-", Some(*old_lineno), None, text, Some(Color::Red))
-                    }
+                    } => highlighted_prefixed_line(
+                        " ",
+                        Some(*old_lineno),
+                        Some(*new_lineno),
+                        text,
+                        None,
+                        width,
+                        &mut highlighter,
+                        DiffKind::Context,
+                    ),
+                    DiffLine::Added { new_lineno, text } => highlighted_prefixed_line(
+                        "+",
+                        None,
+                        Some(*new_lineno),
+                        text,
+                        Some(Color::Green),
+                        width,
+                        &mut highlighter,
+                        DiffKind::Added,
+                    ),
+                    DiffLine::Removed { old_lineno, text } => highlighted_prefixed_line(
+                        "-",
+                        Some(*old_lineno),
+                        None,
+                        text,
+                        Some(Color::Red),
+                        width,
+                        &mut highlighter,
+                        DiffKind::Removed,
+                    ),
                 });
             }
 
@@ -353,6 +378,7 @@ fn side_session_lines<'a>(
     let mut lines = Vec::new();
 
     for (file_index, file) in app.session.files.iter().enumerate() {
+        let mut highlighter = FileHighlighter::new(&file.path);
         lines.push(file_separator_line(width));
         lines.push(file_side_header_line(
             file,
@@ -371,19 +397,47 @@ fn side_session_lines<'a>(
                         new_lineno,
                         text,
                     } => match side {
-                        DiffSide::Old => side_line(" ", Some(*old_lineno), text, width, None),
-                        DiffSide::New => side_line(" ", Some(*new_lineno), text, width, None),
+                        DiffSide::Old => highlighted_side_line(
+                            " ",
+                            Some(*old_lineno),
+                            text,
+                            width,
+                            None,
+                            &mut highlighter,
+                            DiffKind::Context,
+                        ),
+                        DiffSide::New => highlighted_side_line(
+                            " ",
+                            Some(*new_lineno),
+                            text,
+                            width,
+                            None,
+                            &mut highlighter,
+                            DiffKind::Context,
+                        ),
                     },
                     DiffLine::Added { new_lineno, text } => match side {
                         DiffSide::Old => side_line(" ", None, "", width, Some(Color::DarkGray)),
-                        DiffSide::New => {
-                            side_line("+", Some(*new_lineno), text, width, Some(Color::Green))
-                        }
+                        DiffSide::New => highlighted_side_line(
+                            "+",
+                            Some(*new_lineno),
+                            text,
+                            width,
+                            Some(Color::Green),
+                            &mut highlighter,
+                            DiffKind::Added,
+                        ),
                     },
                     DiffLine::Removed { old_lineno, text } => match side {
-                        DiffSide::Old => {
-                            side_line("-", Some(*old_lineno), text, width, Some(Color::Red))
-                        }
+                        DiffSide::Old => highlighted_side_line(
+                            "-",
+                            Some(*old_lineno),
+                            text,
+                            width,
+                            Some(Color::Red),
+                            &mut highlighter,
+                            DiffKind::Removed,
+                        ),
                         DiffSide::New => side_line(" ", None, "", width, Some(Color::DarkGray)),
                     },
                 });
@@ -480,28 +534,72 @@ fn hunk_header_line<'a>(header: &'a str, selected: bool) -> Line<'a> {
     Line::from(Span::styled(header, style))
 }
 
-fn prefixed_line<'a>(
-    prefix: &'a str,
+fn highlighted_prefixed_line(
+    prefix: &str,
     old_lineno: Option<usize>,
     new_lineno: Option<usize>,
-    text: &'a str,
+    text: &str,
     color: Option<Color>,
-) -> Line<'a> {
+    width: usize,
+    highlighter: &mut FileHighlighter<'static>,
+    diff_kind: DiffKind,
+) -> Line<'static> {
+    let background = diff_background(diff_kind);
     let style = color
         .map(|value| Style::default().fg(value))
+        .map(|style| match background {
+            Some(background) => style.bg(background),
+            None => style,
+        })
         .unwrap_or_default();
-    Line::from(vec![
+    let line_number_style = match background {
+        Some(background) => Style::default().fg(Color::DarkGray).bg(background),
+        None => Style::default().fg(Color::DarkGray),
+    };
+    let mut spans = vec![
         Span::styled(format!("{prefix:>1} "), style),
         Span::styled(
             format!("{:>4} ", format_lineno(old_lineno)),
-            Style::default().fg(Color::DarkGray),
+            line_number_style,
         ),
         Span::styled(
             format!("{:>4} ", format_lineno(new_lineno)),
-            Style::default().fg(Color::DarkGray),
+            line_number_style,
         ),
-        Span::styled(text, style),
-    ])
+    ];
+    let prefix_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    let available_width = width.saturating_sub(prefix_width);
+    let mut code_spans = highlighter.highlight_line(text, diff_kind);
+    let rendered_code_width: usize = code_spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum();
+    if rendered_code_width > available_width {
+        code_spans = vec![Span::styled(
+            truncate_text(text, available_width),
+            background
+                .map(|value| Style::default().bg(value))
+                .unwrap_or_default(),
+        )];
+    } else if rendered_code_width < available_width {
+        code_spans.push(Span::styled(
+            " ".repeat(available_width - rendered_code_width),
+            background
+                .map(|value| Style::default().bg(value))
+                .unwrap_or_default(),
+        ));
+    }
+    spans.extend(code_spans);
+    let rendered_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if let Some(background) = background {
+        if rendered_width < width {
+            spans.push(Span::styled(
+                " ".repeat(width - rendered_width),
+                Style::default().bg(background),
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 fn side_line<'a>(
@@ -522,6 +620,63 @@ fn side_line<'a>(
     );
 
     Line::from(Span::styled(pad_to_width(&body, width), style))
+}
+
+fn highlighted_side_line(
+    prefix: &str,
+    lineno: Option<usize>,
+    text: &str,
+    width: usize,
+    color: Option<Color>,
+    highlighter: &mut FileHighlighter<'static>,
+    diff_kind: DiffKind,
+) -> Line<'static> {
+    let background = diff_background(diff_kind);
+    let prefix_style = color
+        .map(|value| Style::default().fg(value))
+        .map(|style| match background {
+            Some(background) => style.bg(background),
+            None => style,
+        })
+        .unwrap_or_default();
+    let line_number = format!("{:>4} {} ", format_lineno(lineno), prefix);
+    let available_width = width.saturating_sub(line_number.chars().count());
+    let mut spans = vec![Span::styled(
+        pad_to_width(&line_number, line_number.chars().count()),
+        prefix_style,
+    )];
+    let mut code_spans = highlighter.highlight_line(text, diff_kind);
+
+    let rendered_code_width: usize = code_spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum();
+    if rendered_code_width > available_width {
+        code_spans = vec![Span::styled(
+            truncate_text(text, available_width),
+            background
+                .map(|value| Style::default().bg(value))
+                .unwrap_or_default(),
+        )];
+    } else if rendered_code_width < available_width {
+        code_spans.push(Span::styled(
+            " ".repeat(available_width - rendered_code_width),
+            background
+                .map(|value| Style::default().bg(value))
+                .unwrap_or_default(),
+        ));
+    }
+
+    spans.extend(code_spans);
+    Line::from(spans)
+}
+
+fn diff_background(diff_kind: DiffKind) -> Option<Color> {
+    match diff_kind {
+        DiffKind::Context => None,
+        DiffKind::Added => Some(Color::Rgb(18, 48, 24)),
+        DiffKind::Removed => Some(Color::Rgb(60, 24, 24)),
+    }
 }
 
 fn truncate_text(text: &str, max_width: usize) -> String {
