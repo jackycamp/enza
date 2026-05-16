@@ -3,7 +3,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::diff::{DiffFile, DiffLine, DiffSession, FileChangeKind};
+use crate::diff::{DiffFile, DiffLine, DiffSession};
 use crate::highlight::{DiffKind, FileHighlighter};
 
 #[derive(Clone, Debug)]
