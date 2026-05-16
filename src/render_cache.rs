@@ -454,13 +454,13 @@ fn highlighted_prefixed_line(
     }
     spans.extend(code_spans);
     let rendered_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
-    if let Some(background) = background {
-        if rendered_width < width {
-            spans.push(Span::styled(
-                " ".repeat(width - rendered_width),
-                Style::default().bg(background),
-            ));
-        }
+    if let Some(background) = background
+        && rendered_width < width
+    {
+        spans.push(Span::styled(
+            " ".repeat(width - rendered_width),
+            Style::default().bg(background),
+        ));
     }
     Line::from(spans)
 }
