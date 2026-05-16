@@ -162,6 +162,23 @@ impl DiffFile {
             FileChangeKind::Added
         }
     }
+
+    pub fn change_counts(&self) -> (usize, usize) {
+        let mut additions = 0usize;
+        let mut deletions = 0usize;
+
+        for hunk in &self.hunks {
+            for line in &hunk.lines {
+                match line {
+                    DiffLine::Added { .. } => additions += 1,
+                    DiffLine::Removed { .. } => deletions += 1,
+                    DiffLine::Context { .. } => {}
+                }
+            }
+        }
+
+        (additions, deletions)
+    }
 }
 
 fn path_to_string(path: &Path) -> String {
