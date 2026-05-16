@@ -16,13 +16,6 @@ impl DiffMode {
             Self::Inline => Self::SideBySide,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::SideBySide => "side-by-side",
-            Self::Inline => "inline",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,13 +36,6 @@ impl FocusPane {
         match self {
             Self::Files => Self::Main,
             Self::Main => Self::Files,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Files => "files",
-            Self::Main => "main",
         }
     }
 }
@@ -225,42 +211,6 @@ impl App {
         self.scroll = self.scroll.saturating_sub(amount);
     }
 
-    pub fn selected_file_name(&self) -> &str {
-        self.current_file()
-            .map(|file| file.path.as_str())
-            .unwrap_or("No changes")
-    }
-
-    pub fn selected_hunk_number(&self) -> usize {
-        self.selected_hunk + 1
-    }
-
-    pub fn selected_hunk_header(&self) -> &str {
-        self.current_file()
-            .and_then(|file| file.hunks.get(self.selected_hunk))
-            .map(|hunk| hunk.header.as_str())
-            .unwrap_or("")
-    }
-
-    pub fn total_hunks(&self) -> usize {
-        self.session.files.iter().map(|file| file.hunks.len()).sum()
-    }
-
-    pub fn selected_hunk_global_index(&self) -> usize {
-        let prior_hunks: usize = self
-            .session
-            .files
-            .iter()
-            .take(self.selected_file)
-            .map(|file| file.hunks.len())
-            .sum();
-        if self.total_hunks() == 0 {
-            0
-        } else {
-            prior_hunks + self.selected_hunk + 1
-        }
-    }
-
     pub fn current_file(&self) -> Option<&DiffFile> {
         self.session.files.get(self.selected_file)
     }
@@ -317,8 +267,8 @@ impl App {
 
             let file_name = parts.last().copied().unwrap_or(file.path.as_str());
             let change_label = match file.change_kind() {
-                FileChangeKind::Added => "added",
-                FileChangeKind::Modified => "modified",
+                FileChangeKind::Added => "A",
+                FileChangeKind::Modified => "M",
             };
 
             entries.push(SidebarEntry {

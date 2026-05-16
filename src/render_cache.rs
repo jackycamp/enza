@@ -17,10 +17,9 @@ pub struct HunkRange {
 #[derive(Clone, Debug)]
 pub struct RenderSession {
     pub inline_width: usize,
-    pub side_width: usize,
+    pub side_by_side_width: usize,
     pub inline_rows: Vec<RenderRow>,
-    pub old_rows: Vec<RenderRow>,
-    pub new_rows: Vec<RenderRow>,
+    pub side_by_side_rows: Vec<RenderRow>,
     pub hunk_ranges: Vec<HunkRange>,
 }
 
@@ -40,17 +39,10 @@ pub enum RenderRow {
     },
 }
 
-#[derive(Clone, Copy)]
-enum DiffSide {
-    Old,
-    New,
-}
-
 impl RenderSession {
-    pub fn build(session: &DiffSession, inline_width: usize, side_width: usize) -> Self {
+    pub fn build(session: &DiffSession, inline_width: usize, side_by_side_width: usize) -> Self {
         let mut inline_rows = Vec::new();
-        let mut old_rows = Vec::new();
-        let mut new_rows = Vec::new();
+        let mut side_by_side_rows = Vec::new();
         let mut hunk_ranges = Vec::new();
         let mut cursor = 0usize;
 
@@ -58,25 +50,19 @@ impl RenderSession {
             let mut highlighter = FileHighlighter::new(&file.path);
 
             let inline_separator = file_separator_line(inline_width);
-            let side_separator = file_separator_line(side_width);
+            let side_separator = file_separator_line(side_by_side_width);
             inline_rows.push(RenderRow::Static(inline_separator.clone()));
-            old_rows.push(RenderRow::Static(side_separator.clone()));
-            new_rows.push(RenderRow::Static(side_separator));
+            side_by_side_rows.push(RenderRow::Static(side_separator));
 
             inline_rows.push(file_header_row(
                 file_index,
                 file_header_line(file, false, inline_width),
                 file_header_line(file, true, inline_width),
             ));
-            old_rows.push(file_header_row(
+            side_by_side_rows.push(file_header_row(
                 file_index,
-                file_side_header_line(file, false, side_width, DiffSide::Old),
-                file_side_header_line(file, true, side_width, DiffSide::Old),
-            ));
-            new_rows.push(file_header_row(
-                file_index,
-                file_side_header_line(file, false, side_width, DiffSide::New),
-                file_side_header_line(file, true, side_width, DiffSide::New),
+                file_side_by_side_header_line(file, false, side_by_side_width),
+                file_side_by_side_header_line(file, true, side_by_side_width),
             ));
 
             cursor += 2;
@@ -90,17 +76,11 @@ impl RenderSession {
                     hunk_header_line(&hunk.header, false),
                     hunk_header_line(&hunk.header, true),
                 ));
-                old_rows.push(hunk_header_row(
+                side_by_side_rows.push(hunk_header_row(
                     file_index,
                     hunk_index,
-                    hunk_header_line(&hunk.header, false),
-                    hunk_header_line(&hunk.header, true),
-                ));
-                new_rows.push(hunk_header_row(
-                    file_index,
-                    hunk_index,
-                    hunk_header_line(&hunk.header, false),
-                    hunk_header_line(&hunk.header, true),
+                    side_by_side_hunk_header_line(&hunk.header, false, side_by_side_width),
+                    side_by_side_hunk_header_line(&hunk.header, true, side_by_side_width),
                 ));
 
                 for diff_line in &hunk.lines {
@@ -109,23 +89,15 @@ impl RenderSession {
                         inline_width,
                         &mut highlighter,
                     )));
-                    old_rows.push(RenderRow::Static(build_side_line(
+                    side_by_side_rows.push(RenderRow::Static(build_combined_side_line(
                         diff_line,
-                        side_width,
-                        DiffSide::Old,
-                        &mut highlighter,
-                    )));
-                    new_rows.push(RenderRow::Static(build_side_line(
-                        diff_line,
-                        side_width,
-                        DiffSide::New,
+                        side_by_side_width,
                         &mut highlighter,
                     )));
                 }
 
                 inline_rows.push(RenderRow::Static(Line::default()));
-                old_rows.push(RenderRow::Static(Line::default()));
-                new_rows.push(RenderRow::Static(Line::default()));
+                side_by_side_rows.push(RenderRow::Static(Line::default()));
 
                 cursor += 1 + hunk.lines.len() + 1;
                 hunk_ranges.push(HunkRange {
@@ -137,24 +109,22 @@ impl RenderSession {
             }
 
             inline_rows.push(RenderRow::Static(Line::default()));
-            old_rows.push(RenderRow::Static(Line::default()));
-            new_rows.push(RenderRow::Static(Line::default()));
+            side_by_side_rows.push(RenderRow::Static(Line::default()));
             cursor += 1;
         }
 
         Self {
             inline_width,
-            side_width,
+            side_by_side_width,
             inline_rows,
-            old_rows,
-            new_rows,
+            side_by_side_rows,
             hunk_ranges,
         }
     }
 
     pub fn line_count_for_mode(&self, side_by_side: bool) -> usize {
         if side_by_side {
-            self.old_rows.len()
+            self.side_by_side_rows.len()
         } else {
             self.inline_rows.len()
         }
@@ -263,88 +233,77 @@ fn build_inline_line(
     }
 }
 
-fn build_side_line(
+fn build_combined_side_line(
     diff_line: &DiffLine,
     width: usize,
-    side: DiffSide,
     highlighter: &mut FileHighlighter<'static>,
 ) -> Line<'static> {
+    let (left_width, right_width) = split_side_by_side_width(width);
+
     match diff_line {
         DiffLine::Context {
             old_lineno,
             new_lineno,
             text,
-        } => match side {
-            DiffSide::Old => highlighted_side_line(
+        } => combined_side_line(
+            highlighted_side_line(
                 " ",
                 Some(*old_lineno),
                 text,
-                width,
+                left_width,
                 None,
                 highlighter,
                 DiffKind::Context,
             ),
-            DiffSide::New => highlighted_side_line(
+            highlighted_side_line(
                 " ",
                 Some(*new_lineno),
                 text,
-                width,
+                right_width,
                 None,
                 highlighter,
                 DiffKind::Context,
             ),
-        },
-        DiffLine::Added { new_lineno, text } => match side {
-            DiffSide::Old => side_line(" ", None, "", width, Some(Color::DarkGray)),
-            DiffSide::New => highlighted_side_line(
+        ),
+        DiffLine::Added { new_lineno, text } => combined_side_line(
+            side_line(" ", None, "", left_width, Some(Color::DarkGray)),
+            highlighted_side_line(
                 "+",
                 Some(*new_lineno),
                 text,
-                width,
+                right_width,
                 Some(Color::Green),
                 highlighter,
                 DiffKind::Added,
             ),
-        },
-        DiffLine::Removed { old_lineno, text } => match side {
-            DiffSide::Old => highlighted_side_line(
+        ),
+        DiffLine::Removed { old_lineno, text } => combined_side_line(
+            highlighted_side_line(
                 "-",
                 Some(*old_lineno),
                 text,
-                width,
+                left_width,
                 Some(Color::Red),
                 highlighter,
                 DiffKind::Removed,
             ),
-            DiffSide::New => side_line(" ", None, "", width, Some(Color::DarkGray)),
-        },
+            side_line(" ", None, "", right_width, Some(Color::DarkGray)),
+        ),
     }
 }
 
 fn file_header_line(file: &DiffFile, selected: bool, width: usize) -> Line<'static> {
-    let status = match file.change_kind() {
-        FileChangeKind::Added => "added",
-        FileChangeKind::Modified => "modified",
+    let label = if file.new_path != "/dev/null" {
+        file.new_path.as_str()
+    } else {
+        file.old_path.as_str()
     };
 
-    chrome_line(width, &file.path, status, selected)
+    chrome_line(width, label, file, selected)
 }
 
-fn file_side_header_line(
-    file: &DiffFile,
-    selected: bool,
-    width: usize,
-    side: DiffSide,
-) -> Line<'static> {
-    let status = match file.change_kind() {
-        FileChangeKind::Added => "added",
-        FileChangeKind::Modified => "modified",
-    };
-
-    match side {
-        DiffSide::Old => shared_chrome_left(width, &file.path, status, selected),
-        DiffSide::New => shared_chrome_right(width, selected),
-    }
+fn file_side_by_side_header_line(file: &DiffFile, selected: bool, width: usize) -> Line<'static> {
+    chrome_line(width, &file.path, file, selected)
 }
 
 fn file_separator_line(width: usize) -> Line<'static> {
@@ -354,7 +313,8 @@ fn file_separator_line(width: usize) -> Line<'static> {
     ))
 }
 
-fn chrome_line(width: usize, label: &str, badge: &str, selected: bool) -> Line<'static> {
+fn chrome_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Line<'static> {
+    let (additions, deletions) = file.change_counts();
     let title_style = if selected {
         Style::default()
             .fg(Color::White)
@@ -364,81 +324,71 @@ fn chrome_line(width: usize, label: &str, badge: &str, selected: bool) -> Line<'
             .fg(Color::Gray)
             .add_modifier(Modifier::BOLD)
     };
-    let badge_style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    };
-    let chrome_style = Style::default().fg(Color::DarkGray);
-    let action_style = Style::default().fg(Color::DarkGray);
 
-    let left = format!(" {label}  ");
-    let badge = format!("[{badge}]");
-    let actions = "[note] [read]";
-    let used = left.chars().count() + badge.chars().count() + 2 + actions.chars().count();
-    let spacer = " ".repeat(width.saturating_sub(used));
+    let additions_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+    let deletions_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+    let chrome_style = Style::default().fg(Color::DarkGray);
+
+    let suffix = format!("+{additions}, -{deletions}");
+    let available_label_width = width.saturating_sub(suffix.chars().count());
+    let label = fit_text(&format!(" {label}"), available_label_width.max(1))
+        .trim_end()
+        .to_string();
+    let rendered_width = label.chars().count() + suffix.chars().count();
+    let trailing = " ".repeat(width.saturating_sub(rendered_width));
 
     Line::from(vec![
-        Span::styled(left, title_style),
-        Span::styled(badge, badge_style),
+        Span::styled(label, title_style),
         Span::styled("  ".to_string(), chrome_style),
-        Span::styled(spacer, chrome_style),
-        Span::styled(actions.to_string(), action_style),
+        Span::styled(format!("+{additions}"), additions_style),
+        Span::styled(", ".to_string(), chrome_style),
+        Span::styled(format!("-{deletions}"), deletions_style),
+        Span::styled(trailing, chrome_style),
     ])
 }
 
-fn shared_chrome_left(width: usize, label: &str, badge: &str, selected: bool) -> Line<'static> {
-    let title_style = if selected {
+fn side_by_side_hunk_header_line(header: &str, selected: bool, width: usize) -> Line<'static> {
+    let style = if selected {
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::DarkGray)
     };
-    let badge_style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    };
-    let chrome_style = Style::default().fg(Color::DarkGray);
-
-    let left = format!("▌ {label}  ");
-    let badge = format!("[{badge}]");
-    let used = left.chars().count() + badge.chars().count();
-    let spacer = " ".repeat(width.saturating_sub(used));
+    let divider_style = Style::default().fg(Color::DarkGray);
+    let (left_width, right_width) = split_side_by_side_width(width);
+    let left = fit_text(header, left_width);
+    let right = fit_text("", right_width);
 
     Line::from(vec![
-        Span::styled(left, title_style),
-        Span::styled(badge, badge_style),
-        Span::styled(spacer, chrome_style),
+        Span::styled(left, style),
+        Span::styled(" │ ".to_string(), divider_style),
+        Span::styled(right, style),
     ])
 }
 
-fn shared_chrome_right(width: usize, _selected: bool) -> Line<'static> {
-    let chrome_style = Style::default().fg(Color::DarkGray);
-    let actions = "[note] [read]";
-    let spacer = " ".repeat(width.saturating_sub(actions.chars().count()));
+fn combined_side_line(left: Line<'static>, right: Line<'static>) -> Line<'static> {
+    let divider_style = Style::default().fg(Color::DarkGray);
+    let mut spans = left.spans;
+    spans.push(Span::styled(" │ ".to_string(), divider_style));
+    spans.extend(right.spans);
+    Line::from(spans)
+}
 
-    Line::from(vec![
-        Span::styled(spacer, chrome_style),
-        Span::styled(actions.to_string(), chrome_style),
-    ])
+fn split_side_by_side_width(width: usize) -> (usize, usize) {
+    let gutter = 3;
+    let usable = width.saturating_sub(gutter);
+    let left = usable / 2;
+    let right = usable.saturating_sub(left);
+    (left, right)
 }
 
 fn hunk_header_line(header: &str, selected: bool) -> Line<'static> {
     let style = if selected {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(Color::White)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
@@ -532,7 +482,7 @@ fn side_line(
         truncate_text(text, width.saturating_sub(8))
     );
 
-    Line::from(Span::styled(pad_to_width(&body, width), style))
+    Line::from(Span::styled(fit_text(&body, width), style))
 }
 
 fn highlighted_side_line(
@@ -580,6 +530,16 @@ fn highlighted_side_line(
     }
 
     spans.extend(code_spans);
+    let rendered_width: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if rendered_width < width {
+        spans.push(Span::styled(
+            " ".repeat(width - rendered_width),
+            background
+                .map(|value| Style::default().bg(value))
+                .unwrap_or_default(),
+        ));
+    }
+
     Line::from(spans)
 }
 
@@ -614,6 +574,10 @@ fn pad_to_width(text: &str, width: usize) -> String {
     }
 
     format!("{text}{:width$}", "", width = width - current)
+}
+
+fn fit_text(text: &str, width: usize) -> String {
+    pad_to_width(&truncate_text(text, width), width)
 }
 
 fn format_lineno(lineno: Option<usize>) -> String {

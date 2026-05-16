@@ -1,9 +1,9 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
 use crate::app::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
@@ -11,10 +11,9 @@ use crate::render_cache::{RenderSession, materialize_rows};
 
 pub fn ensure_render_session(app: &mut App, area: Rect) {
     let (inline_width, side_width) = render_widths(app, area);
-    let needs_rebuild = app
-        .render_session
-        .as_ref()
-        .is_none_or(|cache| cache.inline_width != inline_width || cache.side_width != side_width);
+    let needs_rebuild = app.render_session.as_ref().is_none_or(|cache| {
+        cache.inline_width != inline_width || cache.side_by_side_width != side_width
+    });
 
     if needs_rebuild {
         app.render_session = Some(RenderSession::build(&app.session, inline_width, side_width));
@@ -59,43 +58,7 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(frame.area());
-
-    render_header(frame, root[0], app);
-    render_body(frame, root[1], app);
-    render_footer(frame, root[2], app);
-}
-
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let line = Line::from(vec![
-        Span::styled("enza", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::raw(format!("mode: {}", app.mode.label())),
-        Span::raw("  "),
-        Span::raw(format!(
-            "sidebar: {}",
-            if app.sidebar_open { "open" } else { "closed" }
-        )),
-        Span::raw("  "),
-        Span::raw(format!("focus: {}", app.focus.label())),
-        Span::raw("  "),
-        Span::raw(format!("file: {}", app.selected_file_name())),
-        Span::raw("  "),
-        Span::raw(format!(
-            "hunk: {}/{}",
-            app.selected_hunk_global_index(),
-            app.total_hunks()
-        )),
-    ]);
-
-    frame.render_widget(Paragraph::new(line), area);
+    render_body(frame, frame.area(), app);
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -152,19 +115,10 @@ fn render_diff_shell(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
     if app.session.files.is_empty() {
         frame.render_widget(
-            Paragraph::new("No changes").block(pane_block(" Old ", app.focus == FocusPane::Main)),
-            panes[0],
-        );
-        frame.render_widget(
-            Paragraph::new("No changes").block(pane_block(" New ", app.focus == FocusPane::Main)),
-            panes[1],
+            Paragraph::new("No changes").block(pane_block("", app.focus == FocusPane::Main)),
+            area,
         );
         return;
     }
@@ -173,26 +127,15 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let old_lines = materialize_rows(
-        &cache.old_rows,
+    let lines = materialize_rows(
+        &cache.side_by_side_rows,
         app.scroll,
         app.selected_file,
         app.selected_hunk,
     );
-    let new_lines = materialize_rows(
-        &cache.new_rows,
-        app.scroll,
-        app.selected_file,
-        app.selected_hunk,
-    );
-
     frame.render_widget(
-        Paragraph::new(old_lines).block(pane_block(" Old ", app.focus == FocusPane::Main)),
-        panes[0],
-    );
-    frame.render_widget(
-        Paragraph::new(new_lines).block(pane_block(" New ", app.focus == FocusPane::Main)),
-        panes[1],
+        Paragraph::new(lines).block(pane_block("", app.focus == FocusPane::Main)),
+        area,
     );
 }
 
@@ -222,55 +165,11 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    frame.render_widget(Clear, area);
-    let text = vec![
-        Line::from(vec![
-            "q".bold(),
-            " quit  ".into(),
-            "j/k".bold(),
-            " scroll  ".into(),
-            "]/[".bold(),
-            " next/prev hunk  ".into(),
-            "ctrl-d/u".bold(),
-            " page scroll  ".into(),
-            "tab".bold(),
-            " next focus  ".into(),
-            "shift-tab".bold(),
-            " prev focus  ".into(),
-            "enter".bold(),
-            " toggle/jump  ".into(),
-            "left/right".bold(),
-            " collapse/expand  ".into(),
-            "m".bold(),
-            " toggle mode  ".into(),
-            "b".bold(),
-            " toggle sidebar".into(),
-        ]),
-        Line::from(format!(
-            "current: mode={} focus={} sidebar={} file={} hunk={} ({}) scroll={}",
-            app.mode.label(),
-            app.focus.label(),
-            if app.sidebar_open { "open" } else { "closed" },
-            app.selected_file_name(),
-            app.selected_hunk_number(),
-            app.selected_hunk_header(),
-            app.scroll
-        )),
-    ];
-
-    frame.render_widget(Paragraph::new(text), area);
-}
-
 fn render_widths(app: &App, area: Rect) -> (usize, usize) {
     let content = content_area(app, area);
     let inline_width = content.width.saturating_sub(2) as usize;
-    let side_panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(content);
-    let side_width = side_panes[0].width.saturating_sub(2) as usize;
-    (inline_width, side_width)
+    let side_by_side_width = content.width.saturating_sub(2) as usize;
+    (inline_width, side_by_side_width)
 }
 
 fn viewport_line_capacity(app: &App, area: Rect) -> usize {
@@ -278,21 +177,13 @@ fn viewport_line_capacity(app: &App, area: Rect) -> usize {
 }
 
 fn content_area(app: &App, area: Rect) -> Rect {
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(area);
     if app.sidebar_open {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(1)])
-            .split(root[1])[1]
+            .split(area)[1]
     } else {
-        root[1]
+        area
     }
 }
 
