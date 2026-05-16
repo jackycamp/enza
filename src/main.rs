@@ -9,7 +9,10 @@ use std::{io, time::Duration};
 
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -32,13 +35,17 @@ fn main() -> io::Result<()> {
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()
 }
 
@@ -57,25 +64,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         if event::poll(Duration::from_millis(16))? {
-            let mut latest_key = None;
+            let mut action = NavAction::None;
 
             loop {
-                if let Event::Key(key) = event::read()?
-                    && key.kind == KeyEventKind::Press
-                {
-                    latest_key = Some(key);
-                }
+                action = action.merge(handle_event(&mut app, event::read()?));
 
                 if !event::poll(Duration::from_millis(0))? {
                     break;
                 }
             }
 
-            let Some(key) = latest_key else {
-                continue;
-            };
-
-            let action = handle_key_event(&mut app, key);
             let viewport_area = terminal.get_frame().area();
             ui::ensure_render_session(&mut app, viewport_area);
             app.scroll = app.scroll.min(ui::max_scroll(&app, viewport_area));
@@ -97,6 +95,30 @@ enum NavAction {
     None,
     RevealSelectedHunk,
     SyncSelectionToScroll,
+}
+
+impl NavAction {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (_, Self::RevealSelectedHunk) | (Self::RevealSelectedHunk, _) => {
+                Self::RevealSelectedHunk
+            }
+            (_, Self::SyncSelectionToScroll) | (Self::SyncSelectionToScroll, _) => {
+                Self::SyncSelectionToScroll
+            }
+            _ => Self::None,
+        }
+    }
+}
+
+fn handle_event(app: &mut App, event: Event) -> NavAction {
+    match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            handle_key_event(app, key)
+        }
+        Event::Mouse(mouse) => handle_mouse_event(app, mouse),
+        _ => NavAction::None,
+    }
 }
 
 fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
@@ -189,6 +211,22 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         (KeyCode::Char('m'), _) => {
             app.toggle_mode();
             NavAction::RevealSelectedHunk
+        }
+        _ => NavAction::None,
+    }
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> NavAction {
+    const WHEEL_SCROLL_LINES: u16 = 3;
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            app.scroll_down(WHEEL_SCROLL_LINES);
+            NavAction::SyncSelectionToScroll
+        }
+        MouseEventKind::ScrollUp => {
+            app.scroll_up(WHEEL_SCROLL_LINES);
+            NavAction::SyncSelectionToScroll
         }
         _ => NavAction::None,
     }
