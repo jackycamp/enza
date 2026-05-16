@@ -16,6 +16,7 @@ use ratatui::{Terminal, prelude::CrosstermBackend};
 use crate::{
     app::{App, FocusPane},
     cli::Cli,
+    diff::DiffSession,
 };
 
 fn main() -> io::Result<()> {
@@ -40,7 +41,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    let mut app = App::new();
+    let session = DiffSession::load_from_repo(".").unwrap_or_default();
+    let mut app = App::new(session);
 
     while app.running {
         let viewport_area = terminal.get_frame().area();

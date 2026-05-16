@@ -35,26 +35,13 @@ pub fn sync_selection_to_scroll(app: &mut App) {
 }
 
 pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
-    let visible_lines = viewport_line_capacity(app, area);
-    if visible_lines == 0 {
-        return;
-    }
-
     let Some(range) = document_hunk_ranges(app).into_iter().find(|range| {
         range.file_index == app.selected_file && range.hunk_index == app.selected_hunk
     }) else {
         return;
     };
 
-    let top = app.scroll as usize;
-    let bottom = top + visible_lines;
-
-    if range.start < top {
-        app.scroll = range.start as u16;
-    } else if range.end > bottom {
-        app.scroll = range.end.saturating_sub(visible_lines) as u16;
-    }
-
+    app.scroll = range.start as u16;
     app.scroll = app.scroll.min(max_scroll(app, area));
 }
 
@@ -157,6 +144,18 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
+    if app.session.files.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No changes").block(pane_block(" Old ", app.focus == FocusPane::Main)),
+            panes[0],
+        );
+        frame.render_widget(
+            Paragraph::new("No changes").block(pane_block(" New ", app.focus == FocusPane::Main)),
+            panes[1],
+        );
+        return;
+    }
+
     let old_lines = side_session_lines(
         app,
         app.scroll,
@@ -181,6 +180,15 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if app.session.files.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No changes in working tree")
+                .block(pane_block(" Inline Session ", app.focus == FocusPane::Main)),
+            area,
+        );
+        return;
+    }
+
     let lines = inline_session_lines(app, app.scroll, area.width.saturating_sub(2) as usize);
     frame.render_widget(
         Paragraph::new(lines).block(pane_block(" Inline Session ", app.focus == FocusPane::Main)),
@@ -304,7 +312,7 @@ fn inline_session_lines<'a>(app: &'a App, scroll: u16, width: usize) -> Vec<Line
 
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
             let selected = file_index == app.selected_file && hunk_index == app.selected_hunk;
-            lines.push(hunk_header_line(hunk.header, selected));
+            lines.push(hunk_header_line(&hunk.header, selected));
 
             for diff_line in &hunk.lines {
                 lines.push(match diff_line {
@@ -354,7 +362,7 @@ fn side_session_lines<'a>(
 
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
             let selected = file_index == app.selected_file && hunk_index == app.selected_hunk;
-            lines.push(hunk_header_line(hunk.header, selected));
+            lines.push(hunk_header_line(&hunk.header, selected));
 
             for diff_line in &hunk.lines {
                 lines.push(match diff_line {
@@ -418,8 +426,8 @@ fn file_side_header_line(file: &DiffFile, selected: bool, side: DiffSide) -> Lin
     };
 
     let label = match side {
-        DiffSide::Old => file.old_path,
-        DiffSide::New => file.new_path,
+        DiffSide::Old => file.old_path.as_str(),
+        DiffSide::New => file.new_path.as_str(),
     };
 
     Line::from(Span::styled(format!("diff -- {}", label), style))

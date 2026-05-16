@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::diff::{DiffFile, DiffSession};
+use crate::diff::{DiffFile, DiffSession, FileChangeKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiffMode {
@@ -81,8 +81,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
-        let session = DiffSession::demo();
+    pub fn new(session: DiffSession) -> Self {
         Self {
             running: true,
             session,
@@ -192,7 +191,9 @@ impl App {
     }
 
     pub fn next_hunk(&mut self) {
-        let current_file = self.current_file();
+        let Some(current_file) = self.current_file() else {
+            return;
+        };
         if self.selected_hunk + 1 < current_file.hunks.len() {
             self.selected_hunk += 1;
         } else if self.selected_file + 1 < self.session.files.len() {
@@ -206,7 +207,10 @@ impl App {
             self.selected_hunk -= 1;
         } else if self.selected_file > 0 {
             self.selected_file -= 1;
-            self.selected_hunk = self.current_file().hunks.len().saturating_sub(1);
+            self.selected_hunk = self
+                .current_file()
+                .map(|file| file.hunks.len().saturating_sub(1))
+                .unwrap_or(0);
         }
     }
 
@@ -218,19 +222,20 @@ impl App {
         self.scroll = self.scroll.saturating_sub(amount);
     }
 
-    pub fn selected_file_name(&self) -> &'static str {
-        self.current_file().path
+    pub fn selected_file_name(&self) -> &str {
+        self.current_file()
+            .map(|file| file.path.as_str())
+            .unwrap_or("No changes")
     }
 
     pub fn selected_hunk_number(&self) -> usize {
         self.selected_hunk + 1
     }
 
-    pub fn selected_hunk_header(&self) -> &'static str {
+    pub fn selected_hunk_header(&self) -> &str {
         self.current_file()
-            .hunks
-            .get(self.selected_hunk)
-            .map(|hunk| hunk.header)
+            .and_then(|file| file.hunks.get(self.selected_hunk))
+            .map(|hunk| hunk.header.as_str())
             .unwrap_or("")
     }
 
@@ -246,14 +251,15 @@ impl App {
             .take(self.selected_file)
             .map(|file| file.hunks.len())
             .sum();
-        prior_hunks + self.selected_hunk + 1
+        if self.total_hunks() == 0 {
+            0
+        } else {
+            prior_hunks + self.selected_hunk + 1
+        }
     }
 
-    pub fn current_file(&self) -> &DiffFile {
-        self.session
-            .files
-            .get(self.selected_file)
-            .unwrap_or_else(|| self.session.files.first().expect("demo diff has files"))
+    pub fn current_file(&self) -> Option<&DiffFile> {
+        self.session.files.get(self.selected_file)
     }
 
     pub fn sync_sidebar_cursor_to_selected_file(&mut self) {
@@ -306,10 +312,10 @@ impl App {
                 continue;
             }
 
-            let file_name = parts.last().copied().unwrap_or(file.path);
+            let file_name = parts.last().copied().unwrap_or(file.path.as_str());
             let change_label = match file.change_kind() {
-                crate::diff::FileChangeKind::Added => "added",
-                crate::diff::FileChangeKind::Modified => "modified",
+                FileChangeKind::Added => "added",
+                FileChangeKind::Modified => "modified",
             };
 
             entries.push(SidebarEntry {
