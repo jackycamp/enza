@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod diff;
 mod highlight;
+mod render_cache;
 mod ui;
 
 use std::{io, time::Duration};
@@ -47,6 +48,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
 
     while app.running {
         let viewport_area = terminal.get_frame().area();
+        ui::ensure_render_session(&mut app, viewport_area);
         app.scroll = app.scroll.min(ui::max_scroll(&app, viewport_area));
         ui::sync_selection_to_scroll(&mut app);
         if app.focus != FocusPane::Files {
@@ -75,6 +77,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
 
             let action = handle_key_event(&mut app, key);
             let viewport_area = terminal.get_frame().area();
+            ui::ensure_render_session(&mut app, viewport_area);
             app.scroll = app.scroll.min(ui::max_scroll(&app, viewport_area));
             match action {
                 NavAction::RevealSelectedHunk => ui::reveal_selected_hunk(&mut app, viewport_area),

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::diff::{DiffFile, DiffSession, FileChangeKind};
+use crate::render_cache::RenderSession;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiffMode {
@@ -70,6 +71,7 @@ pub struct SidebarEntry {
 pub struct App {
     pub running: bool,
     pub session: DiffSession,
+    pub render_session: Option<RenderSession>,
     pub mode: DiffMode,
     pub focus: FocusPane,
     pub sidebar_open: bool,
@@ -85,6 +87,7 @@ impl App {
         Self {
             running: true,
             session,
+            render_session: None,
             mode: DiffMode::SideBySide,
             focus: FocusPane::Main,
             sidebar_open: true,
