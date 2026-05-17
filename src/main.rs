@@ -25,9 +25,11 @@ use crate::{
 };
 
 fn main() -> io::Result<()> {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    let diff_target = cli.diff_target().unwrap_or_else(|error| error.exit());
+    let diff_filter = cli.diff_filter().unwrap_or_else(|error| error.exit());
     let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal);
+    let result = run_app(&mut terminal, &cli, &diff_target, diff_filter.as_ref());
     restore_terminal(&mut terminal)?;
     result
 }
@@ -49,8 +51,15 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     terminal.show_cursor()
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    let session = DiffSession::load_from_repo(".").unwrap_or_default();
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cli: &Cli,
+    diff_target: &crate::diff::DiffTarget,
+    diff_filter: Option<&crate::diff::DiffFilter>,
+) -> io::Result<()> {
+    let repo_path = cli.repo.as_deref().unwrap_or(std::path::Path::new("."));
+    let session =
+        DiffSession::load_from_repo(repo_path, diff_target, diff_filter).unwrap_or_default();
     let mut app = App::new(session);
 
     while app.running {
