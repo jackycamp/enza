@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod diff;
 mod highlight;
+mod notes;
 mod render_cache;
 mod ui;
 
@@ -65,8 +66,10 @@ fn run_app(
     while app.running {
         let viewport_area = terminal.get_frame().area();
         ui::ensure_render_session(&mut app, viewport_area);
+        app.clamp_cursor_row(ui::max_cursor_row(&app));
+        app.sync_selection_to_cursor();
+        ui::ensure_cursor_visible(&mut app, viewport_area);
         app.scroll = app.scroll.min(ui::max_scroll(&app, viewport_area));
-        ui::sync_selection_to_scroll(&mut app);
         if app.focus != FocusPane::Files {
             app.sync_sidebar_cursor_to_selected_file();
         }
@@ -85,12 +88,19 @@ fn run_app(
 
             let viewport_area = terminal.get_frame().area();
             ui::ensure_render_session(&mut app, viewport_area);
+            app.clamp_cursor_row(ui::max_cursor_row(&app));
             app.scroll = app.scroll.min(ui::max_scroll(&app, viewport_area));
             match action {
                 NavAction::RevealSelectedHunk => ui::reveal_selected_hunk(&mut app, viewport_area),
-                NavAction::SyncSelectionToScroll => ui::sync_selection_to_scroll(&mut app),
+                NavAction::PromptForNote => app.start_note_input(),
+                NavAction::SyncSelectionToScroll => {
+                    app.sync_selection_to_cursor();
+                    ui::ensure_cursor_visible(&mut app, viewport_area);
+                }
                 NavAction::None => {}
             }
+            app.sync_selection_to_cursor();
+            ui::ensure_cursor_visible(&mut app, viewport_area);
             if app.focus != FocusPane::Files {
                 app.sync_sidebar_cursor_to_selected_file();
             }
@@ -103,12 +113,14 @@ fn run_app(
 enum NavAction {
     None,
     RevealSelectedHunk,
+    PromptForNote,
     SyncSelectionToScroll,
 }
 
 impl NavAction {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
+            (_, Self::PromptForNote) | (Self::PromptForNote, _) => Self::PromptForNote,
             (_, Self::RevealSelectedHunk) | (Self::RevealSelectedHunk, _) => {
                 Self::RevealSelectedHunk
             }
@@ -131,6 +143,10 @@ fn handle_event(app: &mut App, event: Event) -> NavAction {
 }
 
 fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
+    if app.note_input_active() {
+        return handle_note_input_key_event(app, key);
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) => {
             app.quit();
@@ -138,7 +154,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         }
         (KeyCode::Char('j') | KeyCode::Down, _) => match app.focus {
             FocusPane::Main => {
-                app.scroll_down(1);
+                app.move_cursor_down(1, ui::max_cursor_row(app));
                 NavAction::SyncSelectionToScroll
             }
             FocusPane::Files => {
@@ -148,7 +164,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         },
         (KeyCode::Char('k') | KeyCode::Up, _) => match app.focus {
             FocusPane::Main => {
-                app.scroll_up(1);
+                app.move_cursor_up(1);
                 NavAction::SyncSelectionToScroll
             }
             FocusPane::Files => {
@@ -172,14 +188,14 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         },
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => match app.focus {
             FocusPane::Main => {
-                app.scroll_down(10);
+                app.move_cursor_down(10, ui::max_cursor_row(app));
                 NavAction::SyncSelectionToScroll
             }
             FocusPane::Files => NavAction::None,
         },
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => match app.focus {
             FocusPane::Main => {
-                app.scroll_up(10);
+                app.move_cursor_up(10);
                 NavAction::SyncSelectionToScroll
             }
             FocusPane::Files => NavAction::None,
@@ -210,12 +226,30 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
             app.toggle_sidebar();
             NavAction::RevealSelectedHunk
         }
+        (KeyCode::Char('n'), _) => match app.focus {
+            FocusPane::Main => NavAction::PromptForNote,
+            FocusPane::Files => NavAction::None,
+        },
+        (KeyCode::Char('v'), _) => match app.focus {
+            FocusPane::Main => {
+                app.toggle_selection_anchor();
+                NavAction::SyncSelectionToScroll
+            }
+            FocusPane::Files => NavAction::None,
+        },
+        (KeyCode::Esc, _) => {
+            app.clear_selection();
+            NavAction::None
+        }
         (KeyCode::Enter, _) => match app.focus {
             FocusPane::Files => {
                 app.jump_to_file_cursor();
                 NavAction::RevealSelectedHunk
             }
-            FocusPane::Main => NavAction::None,
+            FocusPane::Main => {
+                app.toggle_current_note_expanded();
+                NavAction::SyncSelectionToScroll
+            }
         },
         (KeyCode::Char('m'), _) => {
             app.toggle_mode();
@@ -230,12 +264,38 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> NavAction {
 
     match mouse.kind {
         MouseEventKind::ScrollDown => {
-            app.scroll_down(WHEEL_SCROLL_LINES);
+            app.move_cursor_down(WHEEL_SCROLL_LINES as usize, ui::max_cursor_row(app));
             NavAction::SyncSelectionToScroll
         }
         MouseEventKind::ScrollUp => {
-            app.scroll_up(WHEEL_SCROLL_LINES);
+            app.move_cursor_up(WHEEL_SCROLL_LINES as usize);
             NavAction::SyncSelectionToScroll
+        }
+        _ => NavAction::None,
+    }
+}
+
+fn handle_note_input_key_event(app: &mut App, key: KeyEvent) -> NavAction {
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => {
+            app.cancel_note_input();
+            NavAction::None
+        }
+        (KeyCode::Enter, _) => {
+            app.submit_note_input();
+            NavAction::None
+        }
+        (KeyCode::Backspace, _) => {
+            app.backspace_note_text();
+            NavAction::None
+        }
+        (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            app.insert_note_text(&ch.to_string());
+            NavAction::None
+        }
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            app.cancel_note_input();
+            NavAction::None
         }
         _ => NavAction::None,
     }

@@ -5,13 +5,41 @@ use ratatui::{
 
 use crate::diff::{DiffFile, DiffLine, DiffSession};
 use crate::highlight::{DiffKind, FileHighlighter};
+use crate::notes::{Note, NoteTarget};
 
 #[derive(Clone, Debug)]
 pub struct HunkRange {
     pub file_index: usize,
     pub hunk_index: usize,
     pub start: usize,
-    pub end: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RowContext {
+    pub file_index: Option<usize>,
+    pub hunk_index: Option<usize>,
+    pub kind: RowKind,
+    pub old_lineno: Option<usize>,
+    pub new_lineno: Option<usize>,
+    pub note_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RowKind {
+    #[default]
+    Separator,
+    FileHeader,
+    HunkHeader,
+    DiffLine,
+    Note,
+    Spacer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NoteSide {
+    Full,
+    Left,
+    Right,
 }
 
 #[derive(Clone, Debug)]
@@ -21,6 +49,7 @@ pub struct RenderSession {
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub hunk_ranges: Vec<HunkRange>,
+    pub row_contexts: Vec<RowContext>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,13 +66,21 @@ pub enum RenderRow {
         normal: Line<'static>,
         selected: Line<'static>,
     },
+    Note(Line<'static>),
 }
 
 impl RenderSession {
-    pub fn build(session: &DiffSession, inline_width: usize, side_by_side_width: usize) -> Self {
-        let mut inline_rows = Vec::new();
-        let mut side_by_side_rows = Vec::new();
-        let mut hunk_ranges = Vec::new();
+    pub fn build(
+        session: &DiffSession,
+        notes: &[Note],
+        expanded_note_ids: &[u64],
+        inline_width: usize,
+        side_by_side_width: usize,
+    ) -> Self {
+        let mut base_inline_rows = Vec::new();
+        let mut base_side_by_side_rows = Vec::new();
+        let mut base_hunk_ranges = Vec::new();
+        let mut base_row_contexts = Vec::new();
         let mut cursor = 0usize;
 
         for (file_index, file) in session.files.iter().enumerate() {
@@ -51,67 +88,171 @@ impl RenderSession {
 
             let inline_separator = file_separator_line(inline_width);
             let side_separator = file_separator_line(side_by_side_width);
-            inline_rows.push(RenderRow::Static(inline_separator.clone()));
-            side_by_side_rows.push(RenderRow::Static(side_separator));
+            base_inline_rows.push(RenderRow::Static(inline_separator.clone()));
+            base_side_by_side_rows.push(RenderRow::Static(side_separator));
+            base_row_contexts.push(RowContext {
+                file_index: Some(file_index),
+                hunk_index: None,
+                kind: RowKind::Separator,
+                old_lineno: None,
+                new_lineno: None,
+                note_id: None,
+            });
 
-            inline_rows.push(file_header_row(
+            base_inline_rows.push(file_header_row(
                 file_index,
                 file_header_line(file, false, inline_width),
                 file_header_line(file, true, inline_width),
             ));
-            side_by_side_rows.push(file_header_row(
+            base_side_by_side_rows.push(file_header_row(
                 file_index,
                 file_side_by_side_header_line(file, false, side_by_side_width),
                 file_side_by_side_header_line(file, true, side_by_side_width),
             ));
+            base_row_contexts.push(RowContext {
+                file_index: Some(file_index),
+                hunk_index: None,
+                kind: RowKind::FileHeader,
+                old_lineno: None,
+                new_lineno: None,
+                note_id: None,
+            });
 
             cursor += 2;
 
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
                 let start = cursor;
 
-                inline_rows.push(hunk_header_row(
+                base_inline_rows.push(hunk_header_row(
                     file_index,
                     hunk_index,
                     hunk_header_line(&hunk.header, false),
                     hunk_header_line(&hunk.header, true),
                 ));
-                side_by_side_rows.push(hunk_header_row(
+                base_side_by_side_rows.push(hunk_header_row(
                     file_index,
                     hunk_index,
                     side_by_side_hunk_header_line(&hunk.header, false, side_by_side_width),
                     side_by_side_hunk_header_line(&hunk.header, true, side_by_side_width),
                 ));
+                base_row_contexts.push(RowContext {
+                    file_index: Some(file_index),
+                    hunk_index: Some(hunk_index),
+                    kind: RowKind::HunkHeader,
+                    old_lineno: None,
+                    new_lineno: None,
+                    note_id: None,
+                });
 
                 for diff_line in &hunk.lines {
-                    inline_rows.push(RenderRow::Static(build_inline_line(
+                    base_inline_rows.push(RenderRow::Static(build_inline_line(
                         diff_line,
                         inline_width,
                         &mut highlighter,
                     )));
-                    side_by_side_rows.push(RenderRow::Static(build_combined_side_line(
+                    base_side_by_side_rows.push(RenderRow::Static(build_combined_side_line(
                         diff_line,
                         side_by_side_width,
                         &mut highlighter,
                     )));
+                    base_row_contexts.push(RowContext {
+                        file_index: Some(file_index),
+                        hunk_index: Some(hunk_index),
+                        kind: RowKind::DiffLine,
+                        old_lineno: diff_line.old_lineno(),
+                        new_lineno: diff_line.new_lineno(),
+                        note_id: None,
+                    });
                 }
 
-                inline_rows.push(RenderRow::Static(Line::default()));
-                side_by_side_rows.push(RenderRow::Static(Line::default()));
+                base_inline_rows.push(RenderRow::Static(Line::default()));
+                base_side_by_side_rows.push(RenderRow::Static(Line::default()));
+                base_row_contexts.push(RowContext {
+                    file_index: Some(file_index),
+                    hunk_index: Some(hunk_index),
+                    kind: RowKind::Spacer,
+                    old_lineno: None,
+                    new_lineno: None,
+                    note_id: None,
+                });
 
                 cursor += 1 + hunk.lines.len() + 1;
-                hunk_ranges.push(HunkRange {
+                base_hunk_ranges.push(HunkRange {
                     file_index,
                     hunk_index,
                     start,
-                    end: cursor,
                 });
             }
 
-            inline_rows.push(RenderRow::Static(Line::default()));
-            side_by_side_rows.push(RenderRow::Static(Line::default()));
+            base_inline_rows.push(RenderRow::Static(Line::default()));
+            base_side_by_side_rows.push(RenderRow::Static(Line::default()));
+            base_row_contexts.push(RowContext {
+                file_index: Some(file_index),
+                hunk_index: None,
+                kind: RowKind::Spacer,
+                old_lineno: None,
+                new_lineno: None,
+                note_id: None,
+            });
             cursor += 1;
         }
+
+        let note_anchors = build_note_anchors(session, notes, &base_row_contexts);
+        let mut inline_rows = Vec::new();
+        let mut side_by_side_rows = Vec::new();
+        let mut row_contexts = Vec::new();
+        let mut inserted_before_base = vec![0usize; base_row_contexts.len() + 1];
+        let mut inserted_total = 0usize;
+        let note_wrap_width = inline_width.min(side_by_side_width);
+
+        for base_index in 0..base_row_contexts.len() {
+            inserted_before_base[base_index] = inserted_total;
+            for note in note_anchors
+                .iter()
+                .filter(|(anchor_index, _)| *anchor_index == base_index)
+                .map(|(_, note)| note)
+            {
+                let expanded = expanded_note_ids.contains(&note.id);
+                let note_side = note_side(note);
+                let note_rows = build_note_rows(note, note_wrap_width, expanded);
+                let inline_note_lines = render_note_rows(&note_rows, inline_width);
+                let side_note_lines =
+                    render_side_by_side_note_rows(&note_rows, side_by_side_width, note_side);
+                let note_context = RowContext {
+                    file_index: base_row_contexts[base_index].file_index,
+                    hunk_index: base_row_contexts[base_index].hunk_index,
+                    kind: RowKind::Note,
+                    old_lineno: None,
+                    new_lineno: None,
+                    note_id: Some(note.id),
+                };
+
+                for line in inline_note_lines {
+                    inline_rows.push(RenderRow::Note(line));
+                    row_contexts.push(note_context);
+                }
+                for line in side_note_lines {
+                    side_by_side_rows.push(RenderRow::Note(line));
+                }
+
+                inserted_total += note_rows.len();
+            }
+
+            inline_rows.push(base_inline_rows[base_index].clone());
+            side_by_side_rows.push(base_side_by_side_rows[base_index].clone());
+            row_contexts.push(base_row_contexts[base_index]);
+        }
+        inserted_before_base[base_row_contexts.len()] =
+            row_contexts.len().saturating_sub(base_row_contexts.len());
+
+        let hunk_ranges = base_hunk_ranges
+            .into_iter()
+            .map(|range| HunkRange {
+                file_index: range.file_index,
+                hunk_index: range.hunk_index,
+                start: range.start + inserted_before_base[range.start],
+            })
+            .collect();
 
         Self {
             inline_width,
@@ -119,6 +260,7 @@ impl RenderSession {
             inline_rows,
             side_by_side_rows,
             hunk_ranges,
+            row_contexts,
         }
     }
 
@@ -131,41 +273,302 @@ impl RenderSession {
     }
 }
 
+fn build_note_anchors<'a>(
+    session: &DiffSession,
+    notes: &'a [Note],
+    row_contexts: &[RowContext],
+) -> Vec<(usize, &'a Note)> {
+    notes
+        .iter()
+        .filter_map(|note| note_anchor_row(session, row_contexts, note).map(|row| (row, note)))
+        .collect()
+}
+
+fn note_anchor_row(
+    session: &DiffSession,
+    row_contexts: &[RowContext],
+    note: &Note,
+) -> Option<usize> {
+    match &note.target {
+        NoteTarget::File { file_path } => row_contexts.iter().position(|context| {
+            matches!(context.kind, RowKind::FileHeader)
+                && context
+                    .file_index
+                    .and_then(|index| session.files.get(index))
+                    .is_some_and(|file| &file.path == file_path)
+        }),
+        NoteTarget::Hunk {
+            file_path,
+            hunk_header,
+        } => row_contexts.iter().position(|context| {
+            matches!(context.kind, RowKind::DiffLine | RowKind::HunkHeader)
+                && context
+                    .file_index
+                    .and_then(|index| session.files.get(index))
+                    .is_some_and(|file| {
+                        &file.path == file_path
+                            && context
+                                .hunk_index
+                                .and_then(|hunk_index| file.hunks.get(hunk_index))
+                                .is_some_and(|hunk| &hunk.header == hunk_header)
+                    })
+        }),
+        NoteTarget::Line {
+            file_path,
+            old_lineno,
+            new_lineno,
+        } => row_contexts.iter().position(|context| {
+            matches!(context.kind, RowKind::DiffLine)
+                && context.old_lineno == *old_lineno
+                && context.new_lineno == *new_lineno
+                && context
+                    .file_index
+                    .and_then(|index| session.files.get(index))
+                    .is_some_and(|file| &file.path == file_path)
+        }),
+        NoteTarget::Range {
+            file_path,
+            start_old_lineno,
+            start_new_lineno,
+            ..
+        } => row_contexts.iter().position(|context| {
+            matches!(context.kind, RowKind::DiffLine)
+                && context.old_lineno == *start_old_lineno
+                && context.new_lineno == *start_new_lineno
+                && context
+                    .file_index
+                    .and_then(|index| session.files.get(index))
+                    .is_some_and(|file| &file.path == file_path)
+        }),
+    }
+}
+
+fn build_note_rows(note: &Note, width: usize, expanded: bool) -> Vec<String> {
+    let body_width = width.saturating_sub(4).max(8);
+    let mut rows = wrap_text(&note.body, body_width);
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+
+    if !expanded && rows.len() > 2 {
+        rows.truncate(2);
+        if let Some(last) = rows.last_mut() {
+            *last = truncate_with_ellipsis(last, body_width);
+        }
+    }
+
+    rows
+}
+
+fn note_side(note: &Note) -> NoteSide {
+    match &note.target {
+        NoteTarget::Line {
+            old_lineno: Some(_),
+            new_lineno: None,
+            ..
+        }
+        | NoteTarget::Range {
+            start_old_lineno: Some(_),
+            start_new_lineno: None,
+            ..
+        } => NoteSide::Left,
+        NoteTarget::Line {
+            old_lineno: None,
+            new_lineno: Some(_),
+            ..
+        }
+        | NoteTarget::Range {
+            start_old_lineno: None,
+            start_new_lineno: Some(_),
+            ..
+        } => NoteSide::Right,
+        _ => NoteSide::Full,
+    }
+}
+
+fn render_note_rows(rows: &[String], width: usize) -> Vec<Line<'static>> {
+    let inner_width = width.saturating_sub(2).max(4);
+    let border_style = Style::default().fg(Color::DarkGray);
+    let content_style = Style::default().fg(Color::White);
+    let mut rendered = Vec::with_capacity(rows.len() + 2);
+
+    rendered.push(Line::from(vec![
+        Span::styled("┌".to_string(), border_style),
+        Span::styled("─".repeat(inner_width), border_style),
+        Span::styled("┐".to_string(), border_style),
+    ]));
+
+    for row in rows {
+        rendered.push(Line::from(vec![
+            Span::styled("│".to_string(), border_style),
+            Span::styled(fit_text(&format!(" {row}"), inner_width), content_style),
+            Span::styled("│".to_string(), border_style),
+        ]));
+    }
+
+    rendered.push(Line::from(vec![
+        Span::styled("└".to_string(), border_style),
+        Span::styled("─".repeat(inner_width), border_style),
+        Span::styled("┘".to_string(), border_style),
+    ]));
+
+    rendered
+}
+
+fn render_side_by_side_note_rows(
+    rows: &[String],
+    width: usize,
+    side: NoteSide,
+) -> Vec<Line<'static>> {
+    if side == NoteSide::Full {
+        return render_note_rows(rows, width);
+    }
+
+    let (left_width, right_width) = split_side_by_side_width(width);
+    let note_width = match side {
+        NoteSide::Left => left_width,
+        NoteSide::Right => right_width,
+        NoteSide::Full => width,
+    };
+    let note_rows = render_note_rows(rows, note_width);
+    let divider_style = Style::default().fg(Color::DarkGray);
+
+    note_rows
+        .into_iter()
+        .map(|note_row| match side {
+            NoteSide::Left => combined_side_line(note_row, blank_note_side_line(right_width)),
+            NoteSide::Right => {
+                let mut spans = blank_note_side_line(left_width).spans;
+                spans.push(Span::styled(" │ ".to_string(), divider_style));
+                spans.extend(note_row.spans);
+                Line::from(spans)
+            }
+            NoteSide::Full => unreachable!(),
+        })
+        .collect()
+}
+
+fn blank_note_side_line(width: usize) -> Line<'static> {
+    Line::from(Span::raw(" ".repeat(width)))
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let current_len = current.chars().count();
+        let word_len = word.chars().count();
+        let separator = usize::from(!current.is_empty());
+
+        if current_len + separator + word_len > width && !current.is_empty() {
+            rows.push(current);
+            current = word.to_string();
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+    }
+
+    if !current.is_empty() {
+        rows.push(current);
+    }
+
+    rows
+}
+
+fn truncate_with_ellipsis(text: &str, width: usize) -> String {
+    truncate_text(text, width.saturating_sub(1).max(1))
+}
+
 pub fn materialize_rows(
     rows: &[RenderRow],
+    row_contexts: &[RowContext],
     scroll: u16,
     selected_file: usize,
     selected_hunk: usize,
+    cursor_row: usize,
+    cursor_focused: bool,
+    selected_rows: Option<(usize, usize)>,
 ) -> Vec<Line<'static>> {
     rows.iter()
         .skip(scroll as usize)
-        .map(|row| match row {
-            RenderRow::Static(line) => line.clone(),
-            RenderRow::FileHeader {
-                file_index,
-                normal,
-                selected,
-            } => {
-                if *file_index == selected_file {
-                    selected.clone()
-                } else {
-                    normal.clone()
+        .zip(row_contexts.iter().skip(scroll as usize))
+        .enumerate()
+        .map(|(visible_index, (row, _context))| {
+            let line = match row {
+                RenderRow::Static(line) => line.clone(),
+                RenderRow::FileHeader {
+                    file_index,
+                    normal,
+                    selected,
+                } => {
+                    if *file_index == selected_file {
+                        selected.clone()
+                    } else {
+                        normal.clone()
+                    }
                 }
-            }
-            RenderRow::HunkHeader {
-                file_index,
-                hunk_index,
-                normal,
-                selected,
-            } => {
-                if *file_index == selected_file && *hunk_index == selected_hunk {
-                    selected.clone()
-                } else {
-                    normal.clone()
+                RenderRow::HunkHeader {
+                    file_index,
+                    hunk_index,
+                    normal,
+                    selected,
+                } => {
+                    if *file_index == selected_file && *hunk_index == selected_hunk {
+                        selected.clone()
+                    } else {
+                        normal.clone()
+                    }
                 }
+                RenderRow::Note(line) => line.clone(),
+            };
+
+            let absolute_row = scroll as usize + visible_index;
+            let in_selection = selected_rows
+                .is_some_and(|(start, end)| absolute_row >= start && absolute_row <= end);
+
+            if absolute_row == cursor_row {
+                highlight_cursor_line(line, cursor_focused, in_selection)
+            } else if in_selection {
+                highlight_selected_line(line)
+            } else {
+                line
             }
         })
         .collect()
+}
+
+fn highlight_cursor_line(line: Line<'static>, focused: bool, in_selection: bool) -> Line<'static> {
+    let cursor_style = if focused {
+        if in_selection {
+            Style::default().bg(Color::Rgb(58, 58, 58))
+        } else {
+            Style::default().bg(Color::Rgb(46, 46, 46))
+        }
+    } else {
+        Style::default().bg(Color::Rgb(34, 34, 34))
+    };
+    patch_line_background(line, cursor_style)
+}
+
+fn highlight_selected_line(line: Line<'static>) -> Line<'static> {
+    patch_line_background(line, Style::default().bg(Color::Rgb(40, 40, 40)))
+}
+
+fn patch_line_background(line: Line<'static>, patch: Style) -> Line<'static> {
+    let spans = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            let style = span.style.patch(patch);
+            Span::styled(span.content, style)
+        })
+        .collect::<Vec<_>>();
+
+    Line::from(spans)
 }
 
 fn file_header_row(file_index: usize, normal: Line<'static>, selected: Line<'static>) -> RenderRow {
@@ -584,4 +987,22 @@ fn format_lineno(lineno: Option<usize>) -> String {
     lineno
         .map(|value| value.to_string())
         .unwrap_or_else(|| "·".to_string())
+}
+
+impl DiffLine {
+    fn old_lineno(&self) -> Option<usize> {
+        match self {
+            Self::Context { old_lineno, .. } | Self::Removed { old_lineno, .. } => {
+                Some(*old_lineno)
+            }
+            Self::Added { .. } => None,
+        }
+    }
+
+    fn new_lineno(&self) -> Option<usize> {
+        match self {
+            Self::Context { new_lineno, .. } | Self::Added { new_lineno, .. } => Some(*new_lineno),
+            Self::Removed { .. } => None,
+        }
+    }
 }
