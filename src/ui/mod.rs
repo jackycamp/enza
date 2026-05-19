@@ -3,10 +3,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 use crate::app::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
+use crate::notes::NoteTarget;
 use crate::render_cache::{RenderSession, materialize_rows};
 
 pub fn ensure_render_session(app: &mut App, area: Rect) {
@@ -16,7 +17,13 @@ pub fn ensure_render_session(app: &mut App, area: Rect) {
     });
 
     if needs_rebuild {
-        app.render_session = Some(RenderSession::build(&app.session, inline_width, side_width));
+        app.render_session = Some(RenderSession::build(
+            &app.session,
+            &app.notes,
+            &app.expanded_note_ids,
+            inline_width,
+            side_width,
+        ));
     }
 }
 
@@ -30,16 +37,14 @@ pub fn max_scroll(app: &App, area: Rect) -> u16 {
     total_lines.saturating_sub(visible_lines) as u16
 }
 
-pub fn sync_selection_to_scroll(app: &mut App) {
+pub fn max_cursor_row(app: &App) -> usize {
     let Some(cache) = &app.render_session else {
-        return;
+        return 0;
     };
 
-    let top_line = app.scroll as usize;
-    if let Some(range) = cache.hunk_ranges.iter().find(|range| top_line < range.end) {
-        app.selected_file = range.file_index;
-        app.selected_hunk = range.hunk_index;
-    }
+    cache
+        .line_count_for_mode(matches!(app.mode, DiffMode::SideBySide))
+        .saturating_sub(1)
 }
 
 pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
@@ -53,7 +58,25 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
         return;
     };
 
-    app.scroll = range.start as u16;
+    app.cursor_row = range.start;
+    ensure_cursor_visible(app, area);
+}
+
+pub fn ensure_cursor_visible(app: &mut App, area: Rect) {
+    let visible_lines = viewport_line_capacity(app, area);
+    let cursor_row = app.cursor_row as u16;
+
+    if cursor_row < app.scroll {
+        app.scroll = cursor_row;
+    } else if visible_lines > 0 {
+        let bottom = app.scroll as usize + visible_lines.saturating_sub(1);
+        if app.cursor_row > bottom {
+            app.scroll = app
+                .cursor_row
+                .saturating_sub(visible_lines.saturating_sub(1)) as u16;
+        }
+    }
+
     app.scroll = app.scroll.min(max_scroll(app, area));
 }
 
@@ -79,6 +102,7 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     render_diff_shell(frame, chunks[1], app);
+    render_note_composer(frame, chunks[1], app);
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -129,9 +153,13 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let lines = materialize_rows(
         &cache.side_by_side_rows,
+        &cache.row_contexts,
         app.scroll,
         app.selected_file,
         app.selected_hunk,
+        app.cursor_row,
+        app.focus == FocusPane::Main,
+        app.selected_row_range(),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.focus == FocusPane::Main)),
@@ -155,14 +183,134 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let lines = materialize_rows(
         &cache.inline_rows,
+        &cache.row_contexts,
         app.scroll,
         app.selected_file,
         app.selected_hunk,
+        app.cursor_row,
+        app.focus == FocusPane::Main,
+        app.selected_row_range(),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.focus == FocusPane::Main)),
         area,
     );
+}
+
+fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(draft) = &app.note_draft else {
+        return;
+    };
+    let target = app.composer_note_target();
+
+    let inner = inner_pane_area(area);
+    if inner.width < 12 || inner.height < 3 {
+        return;
+    }
+
+    let composer_height = 3;
+    let anchor_visible_row = app.note_anchor_row().saturating_sub(app.scroll as usize) as u16;
+    let y = if anchor_visible_row >= composer_height {
+        inner.y + anchor_visible_row - composer_height
+    } else {
+        inner.y + anchor_visible_row.saturating_add(1)
+    }
+    .min(inner.y + inner.height.saturating_sub(composer_height));
+
+    let width = composer_width(app.mode, inner, target.as_ref());
+    let x = composer_x(app.mode, inner, target.as_ref(), width);
+    let area = Rect {
+        x,
+        y,
+        width,
+        height: composer_height,
+    };
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(draft.clone())).block(
+            Block::default()
+                .title(Span::styled(
+                    " Note ",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::White)),
+        ),
+        area,
+    );
+
+    let cursor_x = area.x.saturating_add(1).saturating_add(
+        draft
+            .chars()
+            .count()
+            .min(area.width.saturating_sub(3) as usize) as u16,
+    );
+    let cursor_y = area.y.saturating_add(1);
+    frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn composer_width(mode: DiffMode, inner: Rect, target: Option<&NoteTarget>) -> u16 {
+    match (mode, composer_side(target)) {
+        (DiffMode::SideBySide, ComposerSide::Left | ComposerSide::Right) => {
+            let (left_width, right_width) = split_composer_width(inner.width.saturating_sub(3));
+            left_width.max(right_width).min(64)
+        }
+        _ => inner.width.min(64),
+    }
+}
+
+fn composer_x(mode: DiffMode, inner: Rect, target: Option<&NoteTarget>, width: u16) -> u16 {
+    match (mode, composer_side(target)) {
+        (DiffMode::SideBySide, ComposerSide::Left) => inner.x,
+        (DiffMode::SideBySide, ComposerSide::Right) => {
+            let (left_width, _) = split_composer_width(inner.width.saturating_sub(3));
+            inner.x + left_width + 3
+        }
+        _ => inner.x,
+    }
+    .min(inner.x + inner.width.saturating_sub(width))
+}
+
+fn split_composer_width(width: u16) -> (u16, u16) {
+    let left = width / 2;
+    let right = width.saturating_sub(left);
+    (left, right)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ComposerSide {
+    Full,
+    Left,
+    Right,
+}
+
+fn composer_side(target: Option<&NoteTarget>) -> ComposerSide {
+    match target {
+        Some(NoteTarget::Line {
+            old_lineno: Some(_),
+            new_lineno: None,
+            ..
+        })
+        | Some(NoteTarget::Range {
+            start_old_lineno: Some(_),
+            start_new_lineno: None,
+            ..
+        }) => ComposerSide::Left,
+        Some(NoteTarget::Line {
+            old_lineno: None,
+            new_lineno: Some(_),
+            ..
+        })
+        | Some(NoteTarget::Range {
+            start_old_lineno: None,
+            start_new_lineno: Some(_),
+            ..
+        }) => ComposerSide::Right,
+        _ => ComposerSide::Full,
+    }
 }
 
 fn render_widths(app: &App, area: Rect) -> (usize, usize) {
@@ -184,6 +332,15 @@ fn content_area(app: &App, area: Rect) -> Rect {
             .split(area)[1]
     } else {
         area
+    }
+}
+
+fn inner_pane_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
     }
 }
 
