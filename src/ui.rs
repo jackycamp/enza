@@ -6,21 +6,21 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::app::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
-use crate::notes::NoteTarget;
-use crate::render_cache::{RenderSession, materialize_rows};
+use crate::cache::{DiffCache, materialize_rows};
+use crate::note::NoteTarget;
+use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
-pub fn ensure_render_session(app: &mut App, area: Rect) {
+pub fn ensure_cache(app: &mut App, area: Rect) {
     let (inline_width, side_width) = render_widths(app, area);
-    let needs_rebuild = app.render_session.as_ref().is_none_or(|cache| {
+    let needs_rebuild = app.cache.as_ref().is_none_or(|cache| {
         cache.inline_width != inline_width || cache.side_by_side_width != side_width
     });
 
     if needs_rebuild {
-        app.render_session = Some(RenderSession::build(
+        app.cache = Some(DiffCache::build(
             &app.session,
-            &app.notes,
-            &app.expanded_note_ids,
+            &app.notes.items,
+            &app.notes.expanded_ids,
             inline_width,
             side_width,
         ));
@@ -28,56 +28,58 @@ pub fn ensure_render_session(app: &mut App, area: Rect) {
 }
 
 pub fn max_scroll(app: &App, area: Rect) -> u16 {
-    let Some(cache) = &app.render_session else {
+    let Some(cache) = &app.cache else {
         return 0;
     };
 
     let visible_lines = viewport_line_capacity(app, area);
-    let total_lines = cache.line_count_for_mode(matches!(app.mode, DiffMode::SideBySide));
+    let total_lines = cache.line_count_for_mode(matches!(app.global.mode, DiffMode::SideBySide));
     total_lines.saturating_sub(visible_lines) as u16
 }
 
 pub fn max_cursor_row(app: &App) -> usize {
-    let Some(cache) = &app.render_session else {
+    let Some(cache) = &app.cache else {
         return 0;
     };
 
     cache
-        .line_count_for_mode(matches!(app.mode, DiffMode::SideBySide))
+        .line_count_for_mode(matches!(app.global.mode, DiffMode::SideBySide))
         .saturating_sub(1)
 }
 
 pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
-    let Some(cache) = &app.render_session else {
+    let Some(cache) = &app.cache else {
         return;
     };
 
     let Some(range) = cache.hunk_ranges.iter().find(|range| {
-        range.file_index == app.selected_file && range.hunk_index == app.selected_hunk
+        range.file_index == app.diff_view.selected_file
+            && range.hunk_index == app.diff_view.selected_hunk
     }) else {
         return;
     };
 
-    app.cursor_row = range.start;
+    app.diff_view.cursor_row = range.start;
     ensure_cursor_visible(app, area);
 }
 
 pub fn ensure_cursor_visible(app: &mut App, area: Rect) {
     let visible_lines = viewport_line_capacity(app, area);
-    let cursor_row = app.cursor_row as u16;
+    let cursor_row = app.diff_view.cursor_row as u16;
 
-    if cursor_row < app.scroll {
-        app.scroll = cursor_row;
+    if cursor_row < app.diff_view.scroll {
+        app.diff_view.scroll = cursor_row;
     } else if visible_lines > 0 {
-        let bottom = app.scroll as usize + visible_lines.saturating_sub(1);
-        if app.cursor_row > bottom {
-            app.scroll = app
-                .cursor_row
-                .saturating_sub(visible_lines.saturating_sub(1)) as u16;
+        let bottom = app.diff_view.scroll as usize + visible_lines.saturating_sub(1);
+        if app.diff_view.cursor_row > bottom {
+            app.diff_view.scroll =
+                app.diff_view
+                    .cursor_row
+                    .saturating_sub(visible_lines.saturating_sub(1)) as u16;
         }
     }
 
-    app.scroll = app.scroll.min(max_scroll(app, area));
+    app.diff_view.scroll = app.diff_view.scroll.min(max_scroll(app, area));
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
@@ -85,7 +87,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let chunks = if app.sidebar_open {
+    let chunks = if app.sidebar.open {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(1)])
@@ -97,7 +99,7 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .split(area)
     };
 
-    if app.sidebar_open {
+    if app.sidebar.open {
         render_sidebar(frame, chunks[0], app);
     }
 
@@ -117,12 +119,12 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         })
         .collect();
 
-    let mut state = ListState::default().with_selected(Some(app.sidebar_cursor));
+    let mut state = ListState::default().with_selected(Some(app.sidebar.cursor));
 
     let list = List::new(items)
-        .block(pane_block(" Files ", app.focus == FocusPane::Files))
+        .block(pane_block(" Files ", app.global.focus == FocusPane::Files))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol(if app.focus == FocusPane::Files {
+        .highlight_symbol(if app.global.focus == FocusPane::Files {
             ">"
         } else {
             "·"
@@ -132,7 +134,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_diff_shell(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    match app.mode {
+    match app.global.mode {
         DiffMode::SideBySide => render_side_by_side(frame, area, app),
         DiffMode::Inline => render_inline(frame, area, app),
     }
@@ -141,28 +143,28 @@ fn render_diff_shell(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if app.session.files.is_empty() {
         frame.render_widget(
-            Paragraph::new("No changes").block(pane_block("", app.focus == FocusPane::Main)),
+            Paragraph::new("No changes").block(pane_block("", app.global.focus == FocusPane::Main)),
             area,
         );
         return;
     }
 
-    let Some(cache) = &app.render_session else {
+    let Some(cache) = &app.cache else {
         return;
     };
 
     let lines = materialize_rows(
         &cache.side_by_side_rows,
         &cache.row_contexts,
-        app.scroll,
-        app.selected_file,
-        app.selected_hunk,
-        app.cursor_row,
-        app.focus == FocusPane::Main,
+        app.diff_view.scroll,
+        app.diff_view.selected_file,
+        app.diff_view.selected_hunk,
+        app.diff_view.cursor_row,
+        app.global.focus == FocusPane::Main,
         app.selected_row_range(),
     );
     frame.render_widget(
-        Paragraph::new(lines).block(pane_block("", app.focus == FocusPane::Main)),
+        Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
         area,
     );
 }
@@ -171,34 +173,34 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if app.session.files.is_empty() {
         frame.render_widget(
             Paragraph::new("No changes in working tree")
-                .block(pane_block("", app.focus == FocusPane::Main)),
+                .block(pane_block("", app.global.focus == FocusPane::Main)),
             area,
         );
         return;
     }
 
-    let Some(cache) = &app.render_session else {
+    let Some(cache) = &app.cache else {
         return;
     };
 
     let lines = materialize_rows(
         &cache.inline_rows,
         &cache.row_contexts,
-        app.scroll,
-        app.selected_file,
-        app.selected_hunk,
-        app.cursor_row,
-        app.focus == FocusPane::Main,
+        app.diff_view.scroll,
+        app.diff_view.selected_file,
+        app.diff_view.selected_hunk,
+        app.diff_view.cursor_row,
+        app.global.focus == FocusPane::Main,
         app.selected_row_range(),
     );
     frame.render_widget(
-        Paragraph::new(lines).block(pane_block("", app.focus == FocusPane::Main)),
+        Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
         area,
     );
 }
 
 fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(draft) = &app.note_draft else {
+    let Some(draft) = &app.notes.draft else {
         return;
     };
     let target = app.composer_note_target();
@@ -209,7 +211,9 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     let composer_height = 3;
-    let anchor_visible_row = app.note_anchor_row().saturating_sub(app.scroll as usize) as u16;
+    let anchor_visible_row = app
+        .note_anchor_row()
+        .saturating_sub(app.diff_view.scroll as usize) as u16;
     let y = if anchor_visible_row >= composer_height {
         inner.y + anchor_visible_row - composer_height
     } else {
@@ -217,8 +221,8 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     .min(inner.y + inner.height.saturating_sub(composer_height));
 
-    let width = composer_width(app.mode, inner, target.as_ref());
-    let x = composer_x(app.mode, inner, target.as_ref(), width);
+    let width = composer_width(app.global.mode, inner, target.as_ref());
+    let x = composer_x(app.global.mode, inner, target.as_ref(), width);
     let area = Rect {
         x,
         y,
@@ -325,7 +329,7 @@ fn viewport_line_capacity(app: &App, area: Rect) -> usize {
 }
 
 fn content_area(app: &App, area: Rect) -> Rect {
-    if app.sidebar_open {
+    if app.sidebar.open {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(1)])
@@ -362,7 +366,7 @@ fn pane_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
 fn sidebar_entry_style(app: &App, entry: &SidebarEntry) -> Style {
     match entry.kind {
         SidebarEntryKind::Directory { .. } => Style::default().add_modifier(Modifier::BOLD),
-        SidebarEntryKind::File { file_index } if file_index == app.selected_file => {
+        SidebarEntryKind::File { file_index } if file_index == app.diff_view.selected_file => {
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD)

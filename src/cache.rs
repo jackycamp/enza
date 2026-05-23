@@ -5,7 +5,7 @@ use ratatui::{
 
 use crate::diff::{DiffFile, DiffLine, DiffSession};
 use crate::highlight::{DiffKind, FileHighlighter};
-use crate::notes::{Note, NoteTarget};
+use crate::note::{Note, NoteTarget};
 
 #[derive(Clone, Debug)]
 pub struct HunkRange {
@@ -43,7 +43,7 @@ enum NoteSide {
 }
 
 #[derive(Clone, Debug)]
-pub struct RenderSession {
+pub struct DiffCache {
     pub inline_width: usize,
     pub side_by_side_width: usize,
     pub inline_rows: Vec<RenderRow>,
@@ -69,7 +69,7 @@ pub enum RenderRow {
     Note(Line<'static>),
 }
 
-impl RenderSession {
+impl DiffCache {
     pub fn build(
         session: &DiffSession,
         notes: &[Note],
