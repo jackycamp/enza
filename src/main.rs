@@ -4,8 +4,8 @@ mod highlight;
 mod input;
 mod layout;
 mod note;
+mod render;
 mod state;
-mod ui;
 
 use std::io;
 
@@ -64,38 +64,40 @@ fn run_app(
 
     while app.global.running {
         let viewport_area = terminal.get_frame().area();
-        ui::ensure_layout(&mut app, viewport_area);
-        app.clamp_cursor_row(ui::max_cursor_row(&app));
+        render::ensure_layout(&mut app, viewport_area);
+        app.clamp_cursor_row(render::max_cursor_row(&app));
         app.sync_selection_to_cursor();
-        ui::ensure_cursor_visible(&mut app, viewport_area);
+        render::ensure_cursor_visible(&mut app, viewport_area);
         app.diff_view.scroll = app
             .diff_view
             .scroll
-            .min(ui::max_scroll(&app, viewport_area));
+            .min(render::max_scroll(&app, viewport_area));
         if app.global.focus != FocusPane::Files {
             app.sync_sidebar_cursor_to_selected_file();
         }
-        terminal.draw(|frame| ui::render(frame, &app))?;
+        terminal.draw(|frame| render::render(frame, &app))?;
 
         if let Some(action) = input::poll_and_handle_events(&mut app)? {
             let viewport_area = terminal.get_frame().area();
-            ui::ensure_layout(&mut app, viewport_area);
-            app.clamp_cursor_row(ui::max_cursor_row(&app));
+            render::ensure_layout(&mut app, viewport_area);
+            app.clamp_cursor_row(render::max_cursor_row(&app));
             app.diff_view.scroll = app
                 .diff_view
                 .scroll
-                .min(ui::max_scroll(&app, viewport_area));
+                .min(render::max_scroll(&app, viewport_area));
             match action {
-                NavAction::RevealSelectedHunk => ui::reveal_selected_hunk(&mut app, viewport_area),
+                NavAction::RevealSelectedHunk => {
+                    render::reveal_selected_hunk(&mut app, viewport_area)
+                }
                 NavAction::PromptForNote => app.start_note_input(),
                 NavAction::SyncSelectionToScroll => {
                     app.sync_selection_to_cursor();
-                    ui::ensure_cursor_visible(&mut app, viewport_area);
+                    render::ensure_cursor_visible(&mut app, viewport_area);
                 }
                 NavAction::None => {}
             }
             app.sync_selection_to_cursor();
-            ui::ensure_cursor_visible(&mut app, viewport_area);
+            render::ensure_cursor_visible(&mut app, viewport_area);
             if app.global.focus != FocusPane::Files {
                 app.sync_sidebar_cursor_to_selected_file();
             }

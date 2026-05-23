@@ -5,8 +5,8 @@ use crossterm::event::{
 };
 
 use crate::{
+    render,
     state::{App, FocusPane},
-    ui,
 };
 
 pub enum NavAction {
@@ -69,7 +69,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         }
         (KeyCode::Char('j') | KeyCode::Down, _) => match app.global.focus {
             FocusPane::Main => {
-                app.move_cursor_down(1, ui::max_cursor_row(app));
+                app.move_cursor_down(1, render::max_cursor_row(app));
                 NavAction::SyncSelectionToScroll
             }
             FocusPane::Files => {
@@ -103,7 +103,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         },
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => match app.global.focus {
             FocusPane::Main => {
-                app.move_cursor_down(10, ui::max_cursor_row(app));
+                app.move_cursor_down(10, render::max_cursor_row(app));
                 NavAction::SyncSelectionToScroll
             }
             FocusPane::Files => NavAction::None,
@@ -179,7 +179,7 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> NavAction {
 
     match mouse.kind {
         MouseEventKind::ScrollDown => {
-            app.move_cursor_down(WHEEL_SCROLL_LINES as usize, ui::max_cursor_row(app));
+            app.move_cursor_down(WHEEL_SCROLL_LINES as usize, render::max_cursor_row(app));
             NavAction::SyncSelectionToScroll
         }
         MouseEventKind::ScrollUp => {
