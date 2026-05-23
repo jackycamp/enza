@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::layout::{Layout as DiffLayout, materialize_rows};
+use crate::layout::{Layout as DiffLayout, RowViewState};
 use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
@@ -53,33 +53,33 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     };
 
     let Some(range) = layout.hunk_ranges.iter().find(|range| {
-        range.file_index == app.diff_view.selected_file
-            && range.hunk_index == app.diff_view.selected_hunk
+        range.file_index == app.main_pane.selected_file
+            && range.hunk_index == app.main_pane.selected_hunk
     }) else {
         return;
     };
 
-    app.diff_view.cursor_row = range.start;
+    app.main_pane.cursor_row = range.start;
     ensure_cursor_visible(app, area);
 }
 
 pub fn ensure_cursor_visible(app: &mut App, area: Rect) {
     let visible_lines = viewport_line_capacity(app, area);
-    let cursor_row = app.diff_view.cursor_row as u16;
+    let cursor_row = app.main_pane.cursor_row as u16;
 
-    if cursor_row < app.diff_view.scroll {
-        app.diff_view.scroll = cursor_row;
+    if cursor_row < app.main_pane.scroll {
+        app.main_pane.scroll = cursor_row;
     } else if visible_lines > 0 {
-        let bottom = app.diff_view.scroll as usize + visible_lines.saturating_sub(1);
-        if app.diff_view.cursor_row > bottom {
-            app.diff_view.scroll =
-                app.diff_view
+        let bottom = app.main_pane.scroll as usize + visible_lines.saturating_sub(1);
+        if app.main_pane.cursor_row > bottom {
+            app.main_pane.scroll =
+                app.main_pane
                     .cursor_row
                     .saturating_sub(visible_lines.saturating_sub(1)) as u16;
         }
     }
 
-    app.diff_view.scroll = app.diff_view.scroll.min(max_scroll(app, area));
+    app.main_pane.scroll = app.main_pane.scroll.min(max_scroll(app, area));
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
@@ -153,15 +153,9 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let lines = materialize_rows(
-        &layout.side_by_side_rows,
-        &layout.row_contexts,
-        app.diff_view.scroll,
-        app.diff_view.selected_file,
-        app.diff_view.selected_hunk,
-        app.diff_view.cursor_row,
-        app.global.focus == FocusPane::Main,
-        app.selected_row_range(),
+    let lines = layout.materialize_rows(
+        true,
+        &row_view_state(app, app.global.focus == FocusPane::Main),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
@@ -183,15 +177,9 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let lines = materialize_rows(
-        &layout.inline_rows,
-        &layout.row_contexts,
-        app.diff_view.scroll,
-        app.diff_view.selected_file,
-        app.diff_view.selected_hunk,
-        app.diff_view.cursor_row,
-        app.global.focus == FocusPane::Main,
-        app.selected_row_range(),
+    let lines = layout.materialize_rows(
+        false,
+        &row_view_state(app, app.global.focus == FocusPane::Main),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
@@ -213,7 +201,7 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let composer_height = 3;
     let anchor_visible_row = app
         .note_anchor_row()
-        .saturating_sub(app.diff_view.scroll as usize) as u16;
+        .saturating_sub(app.main_pane.scroll as usize) as u16;
     let y = if anchor_visible_row >= composer_height {
         inner.y + anchor_visible_row - composer_height
     } else {
@@ -366,11 +354,22 @@ fn pane_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
 fn sidebar_entry_style(app: &App, entry: &SidebarEntry) -> Style {
     match entry.kind {
         SidebarEntryKind::Directory { .. } => Style::default().add_modifier(Modifier::BOLD),
-        SidebarEntryKind::File { file_index } if file_index == app.diff_view.selected_file => {
+        SidebarEntryKind::File { file_index } if file_index == app.main_pane.selected_file => {
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD)
         }
         SidebarEntryKind::File { .. } => Style::default(),
+    }
+}
+
+fn row_view_state(app: &App, cursor_focused: bool) -> RowViewState {
+    RowViewState {
+        scroll: app.main_pane.scroll,
+        selected_file: app.main_pane.selected_file,
+        selected_hunk: app.main_pane.selected_hunk,
+        cursor_row: app.main_pane.cursor_row,
+        cursor_focused,
+        selected_rows: app.selected_row_range(),
     }
 }

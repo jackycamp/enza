@@ -2,7 +2,7 @@ use crate::diff::{DiffFile, DiffSession};
 use crate::layout::{Layout, RowContext};
 use crate::note::{Note, NoteTarget};
 use crate::state::{
-    DiffMode, DiffViewState, FocusPane, GlobalState, NoteInputResult, NoteState, SidebarEntry,
+    DiffMode, FocusPane, GlobalState, MainPaneState, NoteInputResult, NoteState, SidebarEntry,
     SidebarState, note_target_for_range, note_target_for_row,
 };
 
@@ -11,7 +11,7 @@ pub struct App {
     pub session: DiffSession,
     pub layout: Option<Layout>,
     pub global: GlobalState,
-    pub diff_view: DiffViewState,
+    pub main_pane: MainPaneState,
     pub sidebar: SidebarState,
     pub notes: NoteState,
 }
@@ -26,7 +26,7 @@ impl App {
                 mode: DiffMode::SideBySide,
                 focus: FocusPane::Main,
             },
-            diff_view: DiffViewState {
+            main_pane: MainPaneState {
                 selected_file: 0,
                 selected_hunk: 0,
                 cursor_row: 0,
@@ -36,6 +36,7 @@ impl App {
             sidebar: SidebarState {
                 open: true,
                 cursor: 0,
+                scroll: 0,
                 collapsed_dirs: Vec::new(),
             },
             notes: NoteState {
@@ -100,29 +101,29 @@ impl App {
 
     pub fn activate_sidebar_cursor(&mut self) {
         if let Some(file_index) = self.sidebar.activate_cursor(&self.session.files) {
-            self.diff_view.selected_file = file_index;
-        self.diff_view.selected_hunk = 0;
-    }
+            self.main_pane.selected_file = file_index;
+            self.main_pane.selected_hunk = 0;
+        }
     }
 
     pub fn next_hunk(&mut self) {
         let Some(current_file) = self.current_file() else {
             return;
         };
-        if self.diff_view.selected_hunk + 1 < current_file.hunks.len() {
-            self.diff_view.selected_hunk += 1;
-        } else if self.diff_view.selected_file + 1 < self.session.files.len() {
-            self.diff_view.selected_file += 1;
-            self.diff_view.selected_hunk = 0;
+        if self.main_pane.selected_hunk + 1 < current_file.hunks.len() {
+            self.main_pane.selected_hunk += 1;
+        } else if self.main_pane.selected_file + 1 < self.session.files.len() {
+            self.main_pane.selected_file += 1;
+            self.main_pane.selected_hunk = 0;
         }
     }
 
     pub fn previous_hunk(&mut self) {
-        if self.diff_view.selected_hunk > 0 {
-            self.diff_view.selected_hunk -= 1;
-        } else if self.diff_view.selected_file > 0 {
-            self.diff_view.selected_file -= 1;
-            self.diff_view.selected_hunk = self
+        if self.main_pane.selected_hunk > 0 {
+            self.main_pane.selected_hunk -= 1;
+        } else if self.main_pane.selected_file > 0 {
+            self.main_pane.selected_file -= 1;
+            self.main_pane.selected_hunk = self
                 .current_file()
                 .map(|file| file.hunks.len().saturating_sub(1))
                 .unwrap_or(0);
@@ -130,42 +131,42 @@ impl App {
     }
 
     pub fn current_file(&self) -> Option<&DiffFile> {
-        self.session.files.get(self.diff_view.selected_file)
+        self.session.files.get(self.main_pane.selected_file)
     }
 
     pub fn move_cursor_down(&mut self, amount: usize, max_row: usize) {
-        self.diff_view.cursor_row = (self.diff_view.cursor_row + amount).min(max_row);
+        self.main_pane.cursor_row = (self.main_pane.cursor_row + amount).min(max_row);
     }
 
     pub fn move_cursor_up(&mut self, amount: usize) {
-        self.diff_view.cursor_row = self.diff_view.cursor_row.saturating_sub(amount);
+        self.main_pane.cursor_row = self.main_pane.cursor_row.saturating_sub(amount);
     }
 
     pub fn clamp_cursor_row(&mut self, max_row: usize) {
-        self.diff_view.cursor_row = self.diff_view.cursor_row.min(max_row);
-        if let Some(anchor) = self.diff_view.selection_anchor {
-            self.diff_view.selection_anchor = Some(anchor.min(max_row));
+        self.main_pane.cursor_row = self.main_pane.cursor_row.min(max_row);
+        if let Some(anchor) = self.main_pane.selection_anchor {
+            self.main_pane.selection_anchor = Some(anchor.min(max_row));
         }
     }
 
     pub fn toggle_selection_anchor(&mut self) {
-        if self.diff_view.selection_anchor == Some(self.diff_view.cursor_row) {
-            self.diff_view.selection_anchor = None;
+        if self.main_pane.selection_anchor == Some(self.main_pane.cursor_row) {
+            self.main_pane.selection_anchor = None;
         } else {
-            self.diff_view.selection_anchor = Some(self.diff_view.cursor_row);
+            self.main_pane.selection_anchor = Some(self.main_pane.cursor_row);
         }
     }
 
     pub fn clear_selection(&mut self) {
-        self.diff_view.selection_anchor = None;
+        self.main_pane.selection_anchor = None;
     }
 
     pub fn selected_row_range(&self) -> Option<(usize, usize)> {
-        self.diff_view.selection_anchor.map(|anchor| {
-            if anchor <= self.diff_view.cursor_row {
-                (anchor, self.diff_view.cursor_row)
+        self.main_pane.selection_anchor.map(|anchor| {
+            if anchor <= self.main_pane.cursor_row {
+                (anchor, self.main_pane.cursor_row)
             } else {
-                (self.diff_view.cursor_row, anchor)
+                (self.main_pane.cursor_row, anchor)
             }
         })
     }
@@ -179,22 +180,22 @@ impl App {
             file_index: Some(file_index),
             hunk_index,
             ..
-        }) = layout.row_contexts.get(self.diff_view.cursor_row).copied()
+        }) = layout.row_contexts.get(self.main_pane.cursor_row).copied()
         else {
             return;
         };
 
-        self.diff_view.selected_file = file_index;
+        self.main_pane.selected_file = file_index;
         if let Some(hunk_index) = hunk_index {
-            self.diff_view.selected_hunk = hunk_index;
+            self.main_pane.selected_hunk = hunk_index;
         } else if let Some(range) = layout
             .hunk_ranges
             .iter()
             .find(|range| range.file_index == file_index)
         {
-            self.diff_view.selected_hunk = range.hunk_index;
+            self.main_pane.selected_hunk = range.hunk_index;
         } else {
-            self.diff_view.selected_hunk = 0;
+            self.main_pane.selected_hunk = 0;
         }
     }
 
@@ -210,7 +211,7 @@ impl App {
         };
         let Some(note_id) = layout
             .row_contexts
-            .get(self.diff_view.cursor_row)
+            .get(self.main_pane.cursor_row)
             .and_then(|context| context.note_id)
         else {
             return;
@@ -271,7 +272,7 @@ impl App {
     pub fn note_anchor_row(&self) -> usize {
         self.selected_row_range()
             .map(|(start, _)| start)
-            .unwrap_or(self.diff_view.cursor_row)
+            .unwrap_or(self.main_pane.cursor_row)
     }
 
     pub fn current_note_target(&self) -> Option<NoteTarget> {
@@ -287,14 +288,14 @@ impl App {
                 &layout.row_contexts,
                 start,
                 end,
-                self.diff_view.cursor_row,
+                self.main_pane.cursor_row,
             );
         }
 
         note_target_for_row(
             &self.session.files,
             &layout.row_contexts,
-            self.diff_view.cursor_row,
+            self.main_pane.cursor_row,
         )
     }
 
@@ -302,7 +303,7 @@ impl App {
         self.layout
             .as_ref()?
             .row_contexts
-            .get(self.diff_view.cursor_row)?
+            .get(self.main_pane.cursor_row)?
             .note_id
     }
 
@@ -321,7 +322,7 @@ impl App {
 
     pub fn sync_sidebar_cursor_to_selected_file(&mut self) {
         self.sidebar
-            .sync_cursor_to_file(&self.session.files, self.diff_view.selected_file);
+            .sync_cursor_to_file(&self.session.files, self.main_pane.selected_file);
     }
 
     pub fn visible_sidebar_entries(&self) -> Vec<SidebarEntry> {

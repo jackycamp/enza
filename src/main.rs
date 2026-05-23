@@ -68,8 +68,8 @@ fn run_app(
         app.clamp_cursor_row(render::max_cursor_row(&app));
         app.sync_selection_to_cursor();
         render::ensure_cursor_visible(&mut app, viewport_area);
-        app.diff_view.scroll = app
-            .diff_view
+        app.main_pane.scroll = app
+            .main_pane
             .scroll
             .min(render::max_scroll(&app, viewport_area));
         if app.global.focus != FocusPane::Files {
@@ -81,8 +81,8 @@ fn run_app(
             let viewport_area = terminal.get_frame().area();
             render::ensure_layout(&mut app, viewport_area);
             app.clamp_cursor_row(render::max_cursor_row(&app));
-            app.diff_view.scroll = app
-                .diff_view
+            app.main_pane.scroll = app
+                .main_pane
                 .scroll
                 .min(render::max_scroll(&app, viewport_area));
             match action {
