@@ -1,8 +1,8 @@
-mod cache;
 mod cli;
 mod diff;
 mod highlight;
 mod input;
+mod layout;
 mod note;
 mod state;
 mod ui;
@@ -64,7 +64,7 @@ fn run_app(
 
     while app.global.running {
         let viewport_area = terminal.get_frame().area();
-        ui::ensure_cache(&mut app, viewport_area);
+        ui::ensure_layout(&mut app, viewport_area);
         app.clamp_cursor_row(ui::max_cursor_row(&app));
         app.sync_selection_to_cursor();
         ui::ensure_cursor_visible(&mut app, viewport_area);
@@ -79,7 +79,7 @@ fn run_app(
 
         if let Some(action) = input::poll_and_handle_events(&mut app)? {
             let viewport_area = terminal.get_frame().area();
-            ui::ensure_cache(&mut app, viewport_area);
+            ui::ensure_layout(&mut app, viewport_area);
             app.clamp_cursor_row(ui::max_cursor_row(&app));
             app.diff_view.scroll = app
                 .diff_view

@@ -1,5 +1,5 @@
-use crate::cache::{DiffCache, RowContext};
 use crate::diff::{DiffFile, DiffSession};
+use crate::layout::{Layout, RowContext};
 use crate::note::{Note, NoteTarget};
 use crate::state::{
     DiffMode, DiffViewState, FocusPane, GlobalState, NoteInputResult, NoteState, SidebarEntry,
@@ -9,7 +9,7 @@ use crate::state::{
 #[derive(Debug)]
 pub struct App {
     pub session: DiffSession,
-    pub cache: Option<DiffCache>,
+    pub layout: Option<Layout>,
     pub global: GlobalState,
     pub diff_view: DiffViewState,
     pub sidebar: SidebarState,
@@ -20,7 +20,7 @@ impl App {
     pub fn new(session: DiffSession) -> Self {
         Self {
             session,
-            cache: None,
+            layout: None,
             global: GlobalState {
                 running: true,
                 mode: DiffMode::SideBySide,
@@ -101,8 +101,8 @@ impl App {
     pub fn activate_sidebar_cursor(&mut self) {
         if let Some(file_index) = self.sidebar.activate_cursor(&self.session.files) {
             self.diff_view.selected_file = file_index;
-            self.diff_view.selected_hunk = 0;
-        }
+        self.diff_view.selected_hunk = 0;
+    }
     }
 
     pub fn next_hunk(&mut self) {
@@ -171,7 +171,7 @@ impl App {
     }
 
     pub fn sync_selection_to_cursor(&mut self) {
-        let Some(cache) = &self.cache else {
+        let Some(layout) = &self.layout else {
             return;
         };
 
@@ -179,7 +179,7 @@ impl App {
             file_index: Some(file_index),
             hunk_index,
             ..
-        }) = cache.row_contexts.get(self.diff_view.cursor_row).copied()
+        }) = layout.row_contexts.get(self.diff_view.cursor_row).copied()
         else {
             return;
         };
@@ -187,7 +187,7 @@ impl App {
         self.diff_view.selected_file = file_index;
         if let Some(hunk_index) = hunk_index {
             self.diff_view.selected_hunk = hunk_index;
-        } else if let Some(range) = cache
+        } else if let Some(range) = layout
             .hunk_ranges
             .iter()
             .find(|range| range.file_index == file_index)
@@ -201,14 +201,14 @@ impl App {
     pub fn add_note(&mut self, target: NoteTarget, body: String) {
         let id = self.notes.items.len() as u64 + 1;
         self.notes.items.push(Note::new(id, target, body));
-        self.cache = None;
+        self.layout = None;
     }
 
     pub fn toggle_current_note_expanded(&mut self) {
-        let Some(cache) = &self.cache else {
+        let Some(layout) = &self.layout else {
             return;
         };
-        let Some(note_id) = cache
+        let Some(note_id) = layout
             .row_contexts
             .get(self.diff_view.cursor_row)
             .and_then(|context| context.note_id)
@@ -217,7 +217,7 @@ impl App {
         };
 
         self.notes.toggle_expanded(note_id);
-        self.cache = None;
+        self.layout = None;
     }
 
     pub fn note_input_active(&self) -> bool {
@@ -256,7 +256,7 @@ impl App {
             NoteInputResult::Edit { note_id, body } => {
                 if let Some(note) = self.notes.items.iter_mut().find(|note| note.id == note_id) {
                     note.body = body;
-                    self.cache = None;
+                    self.layout = None;
                 }
             }
             NoteInputResult::Create { body } => {
@@ -275,7 +275,7 @@ impl App {
     }
 
     pub fn current_note_target(&self) -> Option<NoteTarget> {
-        let Some(cache) = &self.cache else {
+        let Some(layout) = &self.layout else {
             return None;
         };
 
@@ -284,7 +284,7 @@ impl App {
         {
             return note_target_for_range(
                 &self.session.files,
-                &cache.row_contexts,
+                &layout.row_contexts,
                 start,
                 end,
                 self.diff_view.cursor_row,
@@ -293,13 +293,13 @@ impl App {
 
         note_target_for_row(
             &self.session.files,
-            &cache.row_contexts,
+            &layout.row_contexts,
             self.diff_view.cursor_row,
         )
     }
 
     pub fn current_note_id(&self) -> Option<u64> {
-        self.cache
+        self.layout
             .as_ref()?
             .row_contexts
             .get(self.diff_view.cursor_row)?

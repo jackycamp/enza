@@ -1,5 +1,5 @@
 use crate::{
-    cache::{RowContext, RowKind},
+    layout::{RowContext, RowKind},
     diff::DiffFile,
     note::NoteTarget,
 };

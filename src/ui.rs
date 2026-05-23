@@ -1,23 +1,23 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout as FrameLayout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::cache::{DiffCache, materialize_rows};
+use crate::layout::{Layout as DiffLayout, materialize_rows};
 use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
-pub fn ensure_cache(app: &mut App, area: Rect) {
+pub fn ensure_layout(app: &mut App, area: Rect) {
     let (inline_width, side_width) = render_widths(app, area);
-    let needs_rebuild = app.cache.as_ref().is_none_or(|cache| {
-        cache.inline_width != inline_width || cache.side_by_side_width != side_width
+    let needs_rebuild = app.layout.as_ref().is_none_or(|layout| {
+        layout.inline_width != inline_width || layout.side_by_side_width != side_width
     });
 
     if needs_rebuild {
-        app.cache = Some(DiffCache::build(
+        app.layout = Some(DiffLayout::build(
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
@@ -28,31 +28,31 @@ pub fn ensure_cache(app: &mut App, area: Rect) {
 }
 
 pub fn max_scroll(app: &App, area: Rect) -> u16 {
-    let Some(cache) = &app.cache else {
+    let Some(layout) = &app.layout else {
         return 0;
     };
 
     let visible_lines = viewport_line_capacity(app, area);
-    let total_lines = cache.line_count_for_mode(matches!(app.global.mode, DiffMode::SideBySide));
+    let total_lines = layout.line_count_for_mode(matches!(app.global.mode, DiffMode::SideBySide));
     total_lines.saturating_sub(visible_lines) as u16
 }
 
 pub fn max_cursor_row(app: &App) -> usize {
-    let Some(cache) = &app.cache else {
+    let Some(layout) = &app.layout else {
         return 0;
     };
 
-    cache
+    layout
         .line_count_for_mode(matches!(app.global.mode, DiffMode::SideBySide))
         .saturating_sub(1)
 }
 
 pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
-    let Some(cache) = &app.cache else {
+    let Some(layout) = &app.layout else {
         return;
     };
 
-    let Some(range) = cache.hunk_ranges.iter().find(|range| {
+    let Some(range) = layout.hunk_ranges.iter().find(|range| {
         range.file_index == app.diff_view.selected_file
             && range.hunk_index == app.diff_view.selected_hunk
     }) else {
@@ -88,12 +88,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let chunks = if app.sidebar.open {
-        Layout::default()
+        FrameLayout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(1)])
             .split(area)
     } else {
-        Layout::default()
+        FrameLayout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(0), Constraint::Min(1)])
             .split(area)
@@ -149,13 +149,13 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let Some(cache) = &app.cache else {
+    let Some(layout) = &app.layout else {
         return;
     };
 
     let lines = materialize_rows(
-        &cache.side_by_side_rows,
-        &cache.row_contexts,
+        &layout.side_by_side_rows,
+        &layout.row_contexts,
         app.diff_view.scroll,
         app.diff_view.selected_file,
         app.diff_view.selected_hunk,
@@ -179,13 +179,13 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let Some(cache) = &app.cache else {
+    let Some(layout) = &app.layout else {
         return;
     };
 
     let lines = materialize_rows(
-        &cache.inline_rows,
-        &cache.row_contexts,
+        &layout.inline_rows,
+        &layout.row_contexts,
         app.diff_view.scroll,
         app.diff_view.selected_file,
         app.diff_view.selected_hunk,
@@ -330,7 +330,7 @@ fn viewport_line_capacity(app: &App, area: Rect) -> usize {
 
 fn content_area(app: &App, area: Rect) -> Rect {
     if app.sidebar.open {
-        Layout::default()
+        FrameLayout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(1)])
             .split(area)[1]
