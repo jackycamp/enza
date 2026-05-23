@@ -7,18 +7,11 @@ use crate::layout::lines::{
     file_separator_line, file_side_by_side_header_line, hunk_header_line, hunk_header_row,
     side_by_side_hunk_header_line,
 };
-use crate::layout::model::{HunkRange, Layout, RenderRow, RowContext, RowKind};
+use crate::layout::model::{BaseLayout, HunkRange, Layout, RenderRow, RowContext, RowKind};
 use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
 };
 use crate::note::Note;
-
-struct BaseLayout {
-    inline_rows: Vec<RenderRow>,
-    side_by_side_rows: Vec<RenderRow>,
-    hunk_ranges: Vec<HunkRange>,
-    row_contexts: Vec<RowContext>,
-}
 
 struct NoteOverlay {
     inline_rows: Vec<RenderRow>,
@@ -36,25 +29,41 @@ impl Layout {
         side_by_side_width: usize,
     ) -> Self {
         let base = build_base_layout(session, inline_width, side_by_side_width);
+        let mut layout = Self {
+            inline_width,
+            side_by_side_width,
+            base,
+            inline_rows: Vec::new(),
+            side_by_side_rows: Vec::new(),
+            hunk_ranges: Vec::new(),
+            row_contexts: Vec::new(),
+        };
+        layout.refresh_notes(session, notes, expanded_note_ids);
+        layout
+    }
+
+    pub fn refresh_notes(
+        &mut self,
+        session: &DiffSession,
+        notes: &[Note],
+        expanded_note_ids: &[u64],
+    ) {
         let overlay = inject_notes(
             session,
-            &base,
+            &self.base,
             notes,
             expanded_note_ids,
-            inline_width,
-            side_by_side_width,
+            self.inline_width,
+            self.side_by_side_width,
         );
-        let hunk_ranges =
-            adjust_hunk_ranges_for_insertions(base.hunk_ranges, &overlay.inserted_before_base);
 
-        Self {
-            inline_width,
-            side_by_side_width,
-            inline_rows: overlay.inline_rows,
-            side_by_side_rows: overlay.side_by_side_rows,
-            hunk_ranges,
-            row_contexts: overlay.row_contexts,
-        }
+        self.hunk_ranges = adjust_hunk_ranges_for_insertions(
+            self.base.hunk_ranges.clone(),
+            &overlay.inserted_before_base,
+        );
+        self.inline_rows = overlay.inline_rows;
+        self.side_by_side_rows = overlay.side_by_side_rows;
+        self.row_contexts = overlay.row_contexts;
     }
 
     pub fn line_count_for_mode(&self, side_by_side: bool) -> usize {

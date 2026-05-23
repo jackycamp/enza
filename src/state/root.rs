@@ -202,7 +202,7 @@ impl App {
     pub fn add_note(&mut self, target: NoteTarget, body: String) {
         let id = self.notes.items.len() as u64 + 1;
         self.notes.items.push(Note::new(id, target, body));
-        self.layout = None;
+        self.refresh_note_overlay();
     }
 
     pub fn toggle_current_note_expanded(&mut self) {
@@ -218,7 +218,7 @@ impl App {
         };
 
         self.notes.toggle_expanded(note_id);
-        self.layout = None;
+        self.refresh_note_overlay();
     }
 
     pub fn note_input_active(&self) -> bool {
@@ -257,7 +257,7 @@ impl App {
             NoteInputResult::Edit { note_id, body } => {
                 if let Some(note) = self.notes.items.iter_mut().find(|note| note.id == note_id) {
                     note.body = body;
-                    self.layout = None;
+                    self.refresh_note_overlay();
                 }
             }
             NoteInputResult::Create { body } => {
@@ -327,5 +327,11 @@ impl App {
 
     pub fn visible_sidebar_entries(&self) -> Vec<SidebarEntry> {
         self.sidebar.visible_entries(&self.session.files)
+    }
+
+    fn refresh_note_overlay(&mut self) {
+        if let Some(layout) = &mut self.layout {
+            layout.refresh_notes(&self.session, &self.notes.items, &self.notes.expanded_ids);
+        }
     }
 }

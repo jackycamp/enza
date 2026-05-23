@@ -32,6 +32,15 @@ pub enum RowKind {
 pub struct Layout {
     pub inline_width: usize,
     pub side_by_side_width: usize,
+    pub base: BaseLayout,
+    pub inline_rows: Vec<RenderRow>,
+    pub side_by_side_rows: Vec<RenderRow>,
+    pub hunk_ranges: Vec<HunkRange>,
+    pub row_contexts: Vec<RowContext>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BaseLayout {
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub hunk_ranges: Vec<HunkRange>,
