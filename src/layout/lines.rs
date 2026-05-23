@@ -5,22 +5,24 @@ use ratatui::{
 
 use crate::diff::{DiffFile, DiffLine};
 use crate::highlight::{DiffKind, FileHighlighter};
-use crate::layout::model::{RenderRow, RowContext};
+use crate::layout::model::{Layout, RenderRow, RowViewState};
 use crate::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
 
-pub fn materialize_rows(
-    rows: &[RenderRow],
-    row_contexts: &[RowContext],
-    scroll: u16,
-    selected_file: usize,
-    selected_hunk: usize,
-    cursor_row: usize,
-    cursor_focused: bool,
-    selected_rows: Option<(usize, usize)>,
-) -> Vec<Line<'static>> {
-    rows.iter()
-        .skip(scroll as usize)
-        .zip(row_contexts.iter().skip(scroll as usize))
+impl Layout {
+    pub fn materialize_rows(
+        &self,
+        side_by_side: bool,
+        view: &RowViewState,
+    ) -> Vec<Line<'static>> {
+        let rows = if side_by_side {
+            &self.side_by_side_rows
+        } else {
+            &self.inline_rows
+        };
+
+        rows.iter()
+        .skip(view.scroll as usize)
+        .zip(self.row_contexts.iter().skip(view.scroll as usize))
         .enumerate()
         .map(|(visible_index, (row, _context))| {
             let line = match row {
@@ -30,7 +32,7 @@ pub fn materialize_rows(
                     normal,
                     selected,
                 } => {
-                    if *file_index == selected_file {
+                    if *file_index == view.selected_file {
                         selected.clone()
                     } else {
                         normal.clone()
@@ -42,7 +44,7 @@ pub fn materialize_rows(
                     normal,
                     selected,
                 } => {
-                    if *file_index == selected_file && *hunk_index == selected_hunk {
+                    if *file_index == view.selected_file && *hunk_index == view.selected_hunk {
                         selected.clone()
                     } else {
                         normal.clone()
@@ -51,12 +53,12 @@ pub fn materialize_rows(
                 RenderRow::Note(line) => line.clone(),
             };
 
-            let absolute_row = scroll as usize + visible_index;
-            let in_selection = selected_rows
+            let absolute_row = view.scroll as usize + visible_index;
+            let in_selection = view.selected_rows
                 .is_some_and(|(start, end)| absolute_row >= start && absolute_row <= end);
 
-            if absolute_row == cursor_row {
-                highlight_cursor_line(line, cursor_focused, in_selection)
+            if absolute_row == view.cursor_row {
+                highlight_cursor_line(line, view.cursor_focused, in_selection)
             } else if in_selection {
                 highlight_selected_line(line)
             } else {
@@ -64,6 +66,7 @@ pub fn materialize_rows(
             }
         })
         .collect()
+    }
 }
 
 pub fn file_separator_line(width: usize) -> Line<'static> {

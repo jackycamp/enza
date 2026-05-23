@@ -38,6 +38,16 @@ pub struct Layout {
     pub row_contexts: Vec<RowContext>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RowViewState {
+    pub scroll: u16,
+    pub selected_file: usize,
+    pub selected_hunk: usize,
+    pub cursor_row: usize,
+    pub cursor_focused: bool,
+    pub selected_rows: Option<(usize, usize)>,
+}
+
 #[derive(Clone, Debug)]
 pub enum RenderRow {
     Static(Line<'static>),
