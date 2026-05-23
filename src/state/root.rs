@@ -1,9 +1,9 @@
 use crate::cache::{DiffCache, RowContext};
 use crate::diff::{DiffFile, DiffSession};
-use crate::note::{Note, NoteTarget, note_target_for_range, note_target_for_row};
+use crate::note::{Note, NoteTarget};
 use crate::state::{
     DiffMode, DiffViewState, FocusPane, GlobalState, NoteInputResult, NoteState, SidebarEntry,
-    SidebarState,
+    SidebarState, note_target_for_range, note_target_for_row,
 };
 
 #[derive(Debug)]
