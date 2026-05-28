@@ -40,4 +40,5 @@ pub struct GlobalState {
     pub running: bool,
     pub mode: DiffMode,
     pub focus: FocusPane,
+    pub debug_pane_open: bool,
 }

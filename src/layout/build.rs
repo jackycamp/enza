@@ -11,6 +11,7 @@ use crate::layout::model::{BaseLayout, HunkRange, Layout, RenderRow, RowContext,
 use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
 };
+use crate::log;
 use crate::note::Note;
 
 struct NoteOverlay {
@@ -28,6 +29,11 @@ impl Layout {
         inline_width: usize,
         side_by_side_width: usize,
     ) -> Self {
+        let mut timer = log::timer("layout_build");
+        timer.field("files", session.files.len());
+        timer.field("notes", notes.len());
+        timer.field("inline_width", inline_width);
+        timer.field("side_width", side_by_side_width);
         let base = build_base_layout(session, inline_width, side_by_side_width);
         let mut layout = Self {
             inline_width,
@@ -39,6 +45,8 @@ impl Layout {
             row_contexts: Vec::new(),
         };
         layout.refresh_notes(session, notes, expanded_note_ids);
+        timer.field("base_rows", layout.base.row_contexts.len());
+        timer.field("rows", layout.row_contexts.len());
         layout
     }
 
@@ -48,6 +56,10 @@ impl Layout {
         notes: &[Note],
         expanded_note_ids: &[u64],
     ) {
+        let mut timer = log::timer("layout_refresh_notes");
+        timer.field("notes", notes.len());
+        timer.field("expanded_notes", expanded_note_ids.len());
+        timer.field("base_rows", self.base.row_contexts.len());
         let overlay = inject_notes(
             session,
             &self.base,
@@ -64,6 +76,7 @@ impl Layout {
         self.inline_rows = overlay.inline_rows;
         self.side_by_side_rows = overlay.side_by_side_rows;
         self.row_contexts = overlay.row_contexts;
+        timer.field("rows", self.row_contexts.len());
     }
 
     pub fn line_count_for_mode(&self, side_by_side: bool) -> usize {
@@ -80,6 +93,8 @@ fn build_base_layout(
     inline_width: usize,
     side_by_side_width: usize,
 ) -> BaseLayout {
+    let mut timer = log::timer("layout_build_base");
+    timer.field("files", session.files.len());
     let mut inline_rows = Vec::new();
     let mut side_by_side_rows = Vec::new();
     let mut hunk_ranges = Vec::new();
@@ -100,12 +115,15 @@ fn build_base_layout(
         );
     }
 
-    BaseLayout {
+    let base = BaseLayout {
         inline_rows,
         side_by_side_rows,
         hunk_ranges,
         row_contexts,
-    }
+    };
+    timer.field("base_rows", base.row_contexts.len());
+    timer.field("hunk_ranges", base.hunk_ranges.len());
+    base
 }
 
 #[allow(clippy::too_many_arguments)]

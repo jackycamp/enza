@@ -3,11 +3,13 @@ mod diff;
 mod highlight;
 mod input;
 mod layout;
+mod log;
 mod note;
 mod render;
 mod state;
 
 use std::io;
+use std::time::Instant;
 
 use clap::Parser;
 use crossterm::{
@@ -58,9 +60,17 @@ fn run_app(
     diff_filter: Option<&crate::diff::DiffFilter>,
 ) -> io::Result<()> {
     let repo_path = cli.repo.as_deref().unwrap_or(std::path::Path::new("."));
+    let mut diff_load = log::timer("diff_load");
     let session =
         DiffSession::load_from_repo(repo_path, diff_target, diff_filter).unwrap_or_default();
+
+    diff_load.field("files", session.num_files());
+    diff_load.field("hunks", session.num_hunks());
+    diff_load.field("lines", session.num_lines());
+
     let mut app = App::new(session);
+    let first_frame_start = Instant::now();
+    let mut first_frame_logged = false;
 
     while app.global.running {
         let viewport_area = terminal.get_frame().area();
@@ -68,23 +78,44 @@ fn run_app(
         app.clamp_cursor_row(render::max_cursor_row(&app));
         app.sync_selection_to_cursor();
         render::ensure_cursor_visible(&mut app, viewport_area);
+
         app.main_pane.scroll = app
             .main_pane
             .scroll
             .min(render::max_scroll(&app, viewport_area));
+
         if app.global.focus != FocusPane::Files {
             app.sync_sidebar_cursor_to_selected_file();
         }
+
         terminal.draw(|frame| render::render(frame, &app))?;
+
+        if !first_frame_logged {
+            let elapsed_ms = first_frame_start.elapsed().as_millis().to_string();
+            let num_rows = app
+                .layout
+                .as_ref()
+                .map(|layout| layout.row_contexts.len())
+                .unwrap_or(0)
+                .to_string();
+
+            log::add_event(
+                "first_frame",
+                &[("elapsed_ms", elapsed_ms), ("rows", num_rows)],
+            );
+            first_frame_logged = true;
+        }
 
         if let Some(action) = input::poll_and_handle_events(&mut app)? {
             let viewport_area = terminal.get_frame().area();
             render::ensure_layout(&mut app, viewport_area);
+
             app.clamp_cursor_row(render::max_cursor_row(&app));
             app.main_pane.scroll = app
                 .main_pane
                 .scroll
                 .min(render::max_scroll(&app, viewport_area));
+
             match action {
                 NavAction::RevealSelectedHunk => {
                     render::reveal_selected_hunk(&mut app, viewport_area)
@@ -96,8 +127,10 @@ fn run_app(
                 }
                 NavAction::None => {}
             }
+
             app.sync_selection_to_cursor();
             render::ensure_cursor_visible(&mut app, viewport_area);
+
             if app.global.focus != FocusPane::Files {
                 app.sync_sidebar_cursor_to_selected_file();
             }

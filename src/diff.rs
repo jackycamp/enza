@@ -77,6 +77,25 @@ impl DiffSession {
 
         Ok(Self { files })
     }
+
+    pub fn num_files(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn num_hunks(&self) -> usize {
+        self.files
+            .iter()
+            .map(|file| file.hunks.len())
+            .sum::<usize>()
+    }
+
+    pub fn num_lines(&self) -> usize {
+        self.files
+            .iter()
+            .flat_map(|file| file.hunks.iter())
+            .map(|hunk| hunk.lines.len())
+            .sum::<usize>()
+    }
 }
 
 impl DiffFilter {

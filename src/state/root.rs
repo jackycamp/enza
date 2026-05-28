@@ -25,6 +25,7 @@ impl App {
                 running: true,
                 mode: DiffMode::SideBySide,
                 focus: FocusPane::Main,
+                debug_pane_open: false,
             },
             main_pane: MainPaneState {
                 selected_file: 0,
@@ -54,6 +55,10 @@ impl App {
 
     pub fn toggle_mode(&mut self) {
         self.global.mode = self.global.mode.toggle();
+    }
+
+    pub fn toggle_debug_pane(&mut self) {
+        self.global.debug_pane_open = !self.global.debug_pane_open;
     }
 
     pub fn toggle_sidebar(&mut self) {

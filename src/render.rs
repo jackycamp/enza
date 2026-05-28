@@ -3,10 +3,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout as FrameLayout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::layout::{Layout as DiffLayout, RowViewState};
+use crate::log;
 use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
@@ -108,6 +109,25 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let sections = if app.global.debug_pane_open {
+        FrameLayout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
+            .split(area)
+    } else {
+        FrameLayout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(0)])
+            .split(area)
+    };
+
+    render_sidebar_files(frame, sections[0], app);
+    if app.global.debug_pane_open {
+        render_debug_pane(frame, sections[1], app);
+    }
+}
+
+fn render_sidebar_files(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows = app.visible_sidebar_entries();
     let items: Vec<ListItem<'_>> = rows
         .iter()
@@ -131,6 +151,22 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         });
 
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_debug_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lines = debug_lines(area.width.saturating_sub(2) as usize);
+    let title = if app.global.focus == FocusPane::Files {
+        " Debug "
+    } else {
+        " Debug · D to toggle "
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(pane_block(title, false))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_diff_shell(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -360,6 +396,49 @@ fn sidebar_entry_style(app: &App, entry: &SidebarEntry) -> Style {
                 .add_modifier(Modifier::BOLD)
         }
         SidebarEntryKind::File { .. } => Style::default(),
+    }
+}
+
+fn debug_lines(width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for event in log::recent_events(8) {
+        lines.push(Line::from(format_debug_event(&event, width)));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from("No debug events yet"));
+    }
+
+    lines
+}
+
+fn format_debug_event(event: &log::Event, width: usize) -> String {
+    let elapsed_ms = event
+        .fields
+        .iter()
+        .find(|(key, _)| key == "elapsed_ms")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("?");
+
+    let mut line = format!("{} {}ms", short_name(&event.name), elapsed_ms);
+    for (key, value) in event.fields.iter().filter(|(key, _)| key != "elapsed_ms") {
+        let fragment = format!(" {key}={value}");
+        if line.len() + fragment.len() > width.max(12) {
+            break;
+        }
+        line.push_str(&fragment);
+    }
+    line
+}
+
+fn short_name(name: &str) -> &str {
+    match name {
+        "layout_build_base" => "Base Layout",
+        "layout_refresh_notes" => "Note Overlay",
+        "layout_build" => "Total Layout",
+        "diff_load" => "Diff Load",
+        "first_frame" => "First Paint",
+        _ => name,
     }
 }
 

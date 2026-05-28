@@ -141,6 +141,10 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
             app.toggle_sidebar();
             NavAction::RevealSelectedHunk
         }
+        (KeyCode::Char('D'), _) => {
+            app.toggle_debug_pane();
+            NavAction::None
+        }
         (KeyCode::Char('n'), _) => match app.global.focus {
             FocusPane::Main => NavAction::PromptForNote,
             FocusPane::Files => NavAction::None,
