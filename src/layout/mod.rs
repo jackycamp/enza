@@ -4,4 +4,4 @@ mod model;
 mod notes;
 mod text;
 
-pub use model::{Layout, RowContext, RowKind, RowViewState};
+pub use model::{Layout, NodeStatus, RowContext, RowKind, RowViewState};

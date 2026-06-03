@@ -41,10 +41,52 @@ pub struct Layout {
 
 #[derive(Clone, Debug)]
 pub struct BaseLayout {
+    #[allow(dead_code)]
+    pub tree: LayoutTree,
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub hunk_ranges: Vec<HunkRange>,
     pub row_contexts: Vec<RowContext>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LayoutTree {
+    pub files: Vec<FileNode>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileNode {
+    #[allow(dead_code)]
+    pub file_index: usize,
+    #[allow(dead_code)]
+    pub status: NodeStatus,
+    pub header: CachedRows,
+    pub hunks: Vec<HunkNode>,
+    pub trailing_spacer: CachedRows,
+}
+
+#[derive(Clone, Debug)]
+pub struct HunkNode {
+    pub file_index: usize,
+    pub hunk_index: usize,
+    pub status: NodeStatus,
+    pub rows: CachedRows,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CachedRows {
+    pub inline_rows: Vec<RenderRow>,
+    pub side_by_side_rows: Vec<RenderRow>,
+    pub row_contexts: Vec<RowContext>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeStatus {
+    Ready,
+    #[allow(dead_code)]
+    Unbuilt,
+    #[allow(dead_code)]
+    Dirty,
 }
 
 #[derive(Clone, Copy, Debug)]

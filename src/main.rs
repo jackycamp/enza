@@ -98,11 +98,12 @@ fn run_app(
                 .map(|layout| layout.row_contexts.len())
                 .unwrap_or(0)
                 .to_string();
+            let mut fields = vec![("elapsed_ms", elapsed_ms), ("rows", num_rows)];
+            if let Some(rss_mb) = log::current_rss_mb() {
+                fields.push(("rss_mb", rss_mb));
+            }
 
-            log::add_event(
-                "first_frame",
-                &[("elapsed_ms", elapsed_ms), ("rows", num_rows)],
-            );
+            log::add_event("first_frame", &fields);
             first_frame_logged = true;
         }
 
