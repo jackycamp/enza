@@ -121,14 +121,18 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     };
 
     app.main_pane.cursor_row = range.start;
-    app.main_pane.scroll = layout
-        .row_contexts
-        .iter()
-        .position(|context| {
-            context.file_index == Some(app.main_pane.selected_file)
-                && context.kind == crate::layout::RowKind::FileHeader
-        })
-        .unwrap_or(range.start) as u16;
+    app.main_pane.scroll = if app.main_pane.selected_hunk == 0 {
+        layout
+            .row_contexts
+            .iter()
+            .position(|context| {
+                context.file_index == Some(app.main_pane.selected_file)
+                    && context.kind == crate::layout::RowKind::FileHeader
+            })
+            .unwrap_or(range.start) as u16
+    } else {
+        range.start as u16
+    };
     ensure_cursor_visible(app, area);
 }
 
