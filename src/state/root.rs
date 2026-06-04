@@ -2,8 +2,8 @@ use crate::diff::{DiffFile, DiffSession};
 use crate::layout::{Layout, LayoutWorker, RowContext};
 use crate::note::{Note, NoteTarget};
 use crate::state::{
-    DiffMode, FocusPane, GlobalState, MainPaneState, NoteInputResult, NoteState, SidebarEntry,
-    SidebarState, note_target_for_range, note_target_for_row,
+    DiffMode, FocusPane, GlobalState, MainPaneState, NavDirection, NoteInputResult, NoteState,
+    SidebarEntry, SidebarState, note_target_for_range, note_target_for_row,
 };
 
 #[derive(Debug)]
@@ -28,6 +28,7 @@ impl App {
                 mode: DiffMode::SideBySide,
                 focus: FocusPane::Main,
                 debug_pane_open: false,
+                nav_direction: None,
             },
             main_pane: MainPaneState {
                 selected_file: 0,
@@ -136,6 +137,7 @@ impl App {
     }
 
     pub fn next_hunk(&mut self) {
+        self.global.nav_direction = Some(NavDirection::Down);
         let Some(current_file) = self.current_file() else {
             return;
         };
@@ -156,6 +158,7 @@ impl App {
     }
 
     pub fn previous_hunk(&mut self) {
+        self.global.nav_direction = Some(NavDirection::Up);
         if self.main_pane.selected_hunk > 0 {
             self.main_pane.selected_hunk -= 1;
         } else if self.main_pane.selected_file > 0 {
@@ -180,6 +183,7 @@ impl App {
     }
 
     pub fn move_cursor_down(&mut self, amount: usize, max_row: usize) {
+        self.global.nav_direction = Some(NavDirection::Down);
         for _ in 0..amount {
             if self.try_advance_to_next_hunk() {
                 continue;
@@ -190,6 +194,7 @@ impl App {
     }
 
     pub fn move_cursor_up(&mut self, amount: usize) {
+        self.global.nav_direction = Some(NavDirection::Up);
         for _ in 0..amount {
             if self.try_retreat_to_previous_hunk() {
                 continue;

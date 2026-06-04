@@ -41,6 +41,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             app.main_pane.selected_hunk,
             viewport_rows,
             overscan_rows,
+            app.global.nav_direction,
         ));
     } else if let Some(layout) = &mut app.layout {
         let _ = layout.ensure_hunk_window(
@@ -52,6 +53,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             app.main_pane.selected_hunk,
             viewport_rows,
             overscan_rows,
+            app.global.nav_direction,
         );
     }
 
@@ -119,6 +121,14 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     };
 
     app.main_pane.cursor_row = range.start;
+    app.main_pane.scroll = layout
+        .row_contexts
+        .iter()
+        .position(|context| {
+            context.file_index == Some(app.main_pane.selected_file)
+                && context.kind == crate::layout::RowKind::FileHeader
+        })
+        .unwrap_or(range.start) as u16;
     ensure_cursor_visible(app, area);
 }
 

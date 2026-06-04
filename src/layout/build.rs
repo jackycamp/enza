@@ -18,6 +18,7 @@ use crate::layout::notes::{
 use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
 use crate::log;
 use crate::note::Note;
+use crate::state::NavDirection;
 
 struct NoteOverlay {
     inline_rows: Vec<RenderRow>,
@@ -37,6 +38,7 @@ impl Layout {
         selected_hunk: usize,
         viewport_rows: usize,
         overscan_rows: usize,
+        nav_direction: Option<NavDirection>,
     ) -> Self {
         let mut timer = log::timer("layout_build");
         timer.field("files", session.files.len());
@@ -55,6 +57,7 @@ impl Layout {
             selected_hunk,
             viewport_rows,
             overscan_rows,
+            nav_direction,
         );
         let mut layout = Self {
             inline_width,
@@ -84,6 +87,7 @@ impl Layout {
         selected_hunk: usize,
         viewport_rows: usize,
         overscan_rows: usize,
+        nav_direction: Option<NavDirection>,
     ) -> bool {
         if self.target_file != selected_file || self.target_hunk != selected_hunk {
             self.target_generation = self.target_generation.wrapping_add(1);
@@ -104,6 +108,7 @@ impl Layout {
             selected_hunk,
             viewport_rows,
             overscan_rows,
+            nav_direction,
             2,
             1,
         );
@@ -253,6 +258,7 @@ fn build_base_layout(
     selected_hunk: usize,
     viewport_rows: usize,
     overscan_rows: usize,
+    nav_direction: Option<NavDirection>,
 ) -> BaseLayout {
     let mut timer = log::timer("layout_build_base");
     timer.field("files", session.files.len());
@@ -266,6 +272,7 @@ fn build_base_layout(
         selected_hunk,
         viewport_rows,
         overscan_rows,
+        nav_direction,
     );
     let (inline_rows, side_by_side_rows, row_contexts, hunk_ranges) = flatten_layout_tree(&tree);
 
@@ -528,6 +535,7 @@ fn apply_resident_hunk_window_sync(
     selected_hunk: usize,
     viewport_rows: usize,
     overscan_rows: usize,
+    nav_direction: Option<NavDirection>,
 ) -> WindowResult {
     let desired = resident_hunk_window(
         session,
@@ -535,6 +543,7 @@ fn apply_resident_hunk_window_sync(
         selected_hunk,
         viewport_rows,
         overscan_rows,
+        nav_direction,
     );
     let mut changed = false;
     let mut built_hunks = 0usize;
@@ -595,6 +604,7 @@ fn apply_resident_hunk_window(
     selected_hunk: usize,
     viewport_rows: usize,
     overscan_rows: usize,
+    nav_direction: Option<NavDirection>,
     max_builds: usize,
     max_evictions: usize,
 ) -> WindowResult {
@@ -604,6 +614,7 @@ fn apply_resident_hunk_window(
         selected_hunk,
         viewport_rows,
         overscan_rows,
+        nav_direction,
     );
     let mut changed = false;
     let mut built_hunks = 0usize;
@@ -756,6 +767,7 @@ fn resident_hunk_window(
     selected_hunk: usize,
     viewport_rows: usize,
     overscan_rows: usize,
+    nav_direction: Option<NavDirection>,
 ) -> std::collections::HashSet<(usize, usize)> {
     let all_hunks: Vec<(usize, usize, usize)> = session
         .files
@@ -792,23 +804,54 @@ fn resident_hunk_window(
 
     while before_rows < before_target || after_rows < after_target {
         let mut progressed = false;
+        let prefer_up = matches!(nav_direction, Some(NavDirection::Up));
+        let prefer_down = matches!(nav_direction, Some(NavDirection::Down));
 
-        if after_rows < after_target && next_index < all_hunks.len() {
-            let next = all_hunks[next_index];
-            desired.insert((next.0, next.1));
-            after_rows += next.2;
-            next_index += 1;
-            progressed = true;
-        }
-
-        if before_rows < before_target
-            && let Some(index) = previous_index
-        {
-            let previous = all_hunks[index];
-            desired.insert((previous.0, previous.1));
-            before_rows += previous.2;
-            previous_index = index.checked_sub(1);
-            progressed = true;
+        if prefer_up {
+            progressed |= try_extend_up(
+                &all_hunks,
+                &mut desired,
+                &mut before_rows,
+                before_target,
+                &mut previous_index,
+            );
+            progressed |= try_extend_down(
+                &all_hunks,
+                &mut desired,
+                &mut after_rows,
+                after_target,
+                &mut next_index,
+            );
+        } else if prefer_down {
+            progressed |= try_extend_down(
+                &all_hunks,
+                &mut desired,
+                &mut after_rows,
+                after_target,
+                &mut next_index,
+            );
+            progressed |= try_extend_up(
+                &all_hunks,
+                &mut desired,
+                &mut before_rows,
+                before_target,
+                &mut previous_index,
+            );
+        } else {
+            progressed |= try_extend_down(
+                &all_hunks,
+                &mut desired,
+                &mut after_rows,
+                after_target,
+                &mut next_index,
+            );
+            progressed |= try_extend_up(
+                &all_hunks,
+                &mut desired,
+                &mut before_rows,
+                before_target,
+                &mut previous_index,
+            );
         }
 
         if !progressed {
@@ -817,6 +860,45 @@ fn resident_hunk_window(
     }
 
     desired
+}
+
+fn try_extend_down(
+    all_hunks: &[(usize, usize, usize)],
+    desired: &mut std::collections::HashSet<(usize, usize)>,
+    covered_rows: &mut usize,
+    target_rows: usize,
+    next_index: &mut usize,
+) -> bool {
+    if *covered_rows >= target_rows || *next_index >= all_hunks.len() {
+        return false;
+    }
+
+    let next = all_hunks[*next_index];
+    desired.insert((next.0, next.1));
+    *covered_rows += next.2;
+    *next_index += 1;
+    true
+}
+
+fn try_extend_up(
+    all_hunks: &[(usize, usize, usize)],
+    desired: &mut std::collections::HashSet<(usize, usize)>,
+    covered_rows: &mut usize,
+    target_rows: usize,
+    previous_index: &mut Option<usize>,
+) -> bool {
+    if *covered_rows >= target_rows {
+        return false;
+    }
+    let Some(index) = *previous_index else {
+        return false;
+    };
+
+    let previous = all_hunks[index];
+    desired.insert((previous.0, previous.1));
+    *covered_rows += previous.2;
+    *previous_index = index.checked_sub(1);
+    true
 }
 
 fn inject_notes(

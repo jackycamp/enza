@@ -19,6 +19,12 @@ pub enum FocusPane {
     Main,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavDirection {
+    Up,
+    Down,
+}
+
 impl FocusPane {
     pub fn next(self) -> Self {
         match self {
@@ -41,4 +47,5 @@ pub struct GlobalState {
     pub mode: DiffMode,
     pub focus: FocusPane,
     pub debug_pane_open: bool,
+    pub nav_direction: Option<NavDirection>,
 }
