@@ -1,5 +1,5 @@
 use crate::diff::{DiffFile, DiffSession};
-use crate::layout::{Layout, RowContext};
+use crate::layout::{Layout, LayoutWorker, RowContext};
 use crate::note::{Note, NoteTarget};
 use crate::state::{
     DiffMode, FocusPane, GlobalState, MainPaneState, NoteInputResult, NoteState, SidebarEntry,
@@ -10,6 +10,7 @@ use crate::state::{
 pub struct App {
     pub session: DiffSession,
     pub layout: Option<Layout>,
+    pub layout_worker: LayoutWorker,
     pub global: GlobalState,
     pub main_pane: MainPaneState,
     pub sidebar: SidebarState,
@@ -21,6 +22,7 @@ impl App {
         Self {
             session,
             layout: None,
+            layout_worker: LayoutWorker::new(),
             global: GlobalState {
                 running: true,
                 mode: DiffMode::SideBySide,

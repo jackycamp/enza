@@ -15,6 +15,7 @@ use crate::layout::model::{
 use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
 };
+use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
 use crate::log;
 use crate::note::Note;
 
@@ -58,6 +59,9 @@ impl Layout {
         let mut layout = Self {
             inline_width,
             side_by_side_width,
+            target_generation: 0,
+            target_file: selected_file,
+            target_hunk: selected_hunk,
             base,
             inline_rows: Vec::new(),
             side_by_side_rows: Vec::new(),
@@ -72,6 +76,7 @@ impl Layout {
 
     pub fn ensure_hunk_window(
         &mut self,
+        worker: &LayoutWorker,
         session: &DiffSession,
         notes: &[Note],
         expanded_note_ids: &[u64],
@@ -80,10 +85,18 @@ impl Layout {
         viewport_rows: usize,
         overscan_rows: usize,
     ) -> bool {
+        if self.target_file != selected_file || self.target_hunk != selected_hunk {
+            self.target_generation = self.target_generation.wrapping_add(1);
+            self.target_file = selected_file;
+            self.target_hunk = selected_hunk;
+            reset_loading_hunks(&mut self.base.tree);
+            worker.set_generation(self.target_generation);
+        }
         let expand_start = Instant::now();
-        let build_start = Instant::now();
         let window = apply_resident_hunk_window(
             &mut self.base.tree,
+            worker,
+            self.target_generation,
             session,
             self.inline_width,
             self.side_by_side_width,
@@ -94,7 +107,6 @@ impl Layout {
             2,
             1,
         );
-        let build_ms = build_start.elapsed().as_millis();
         if !window.changed {
             return false;
         }
@@ -120,11 +132,13 @@ impl Layout {
             ("built_hunks", window.built_hunks.to_string()),
             ("evicted_hunks", window.evicted_hunks.to_string()),
             ("built_rows", window.built_rows.to_string()),
-            ("build_ms", build_ms.to_string()),
+            ("build_ms", window.build_ms.to_string()),
             ("flatten_ms", flatten_ms.to_string()),
             ("note_ms", note_ms.to_string()),
             ("missing_hunks", window.missing_hunks.to_string()),
             ("extra_hunks", window.extra_hunks.to_string()),
+            ("queued_hunks", window.queued_hunks.to_string()),
+            ("applied_hunks", window.applied_hunks.to_string()),
             ("base_rows", self.base.row_contexts.len().to_string()),
             ("rows", self.row_contexts.len().to_string()),
         ];
@@ -135,6 +149,50 @@ impl Layout {
             "layout_expand",
             &fields,
         );
+        true
+    }
+
+    pub fn ensure_selected_hunk_ready_sync(
+        &mut self,
+        session: &DiffSession,
+        notes: &[Note],
+        expanded_note_ids: &[u64],
+        selected_file: usize,
+        selected_hunk: usize,
+    ) -> bool {
+        let Some(file) = session.files.get(selected_file) else {
+            return false;
+        };
+        let Some(hunk) = file.hunks.get(selected_hunk) else {
+            return false;
+        };
+        let Some(file_node) = self.base.tree.files.get_mut(selected_file) else {
+            return false;
+        };
+        let Some(hunk_node) = file_node.hunks.get_mut(selected_hunk) else {
+            return false;
+        };
+        if hunk_node.status == NodeStatus::Ready {
+            return false;
+        }
+
+        let node = build_hunk_node_for_worker(
+            selected_file,
+            selected_hunk,
+            &file.path,
+            hunk,
+            self.inline_width,
+            self.side_by_side_width,
+        );
+        *hunk_node = node;
+
+        let (inline_rows, side_by_side_rows, row_contexts, hunk_ranges) =
+            flatten_layout_tree(&self.base.tree);
+        self.base.inline_rows = inline_rows;
+        self.base.side_by_side_rows = side_by_side_rows;
+        self.base.row_contexts = row_contexts;
+        self.base.hunk_ranges = hunk_ranges;
+        self.refresh_notes(session, notes, expanded_note_ids);
         true
     }
 
@@ -176,6 +234,17 @@ impl Layout {
     }
 }
 
+fn reset_loading_hunks(tree: &mut LayoutTree) {
+    for file in &mut tree.files {
+        for hunk in &mut file.hunks {
+            if hunk.status == NodeStatus::Loading {
+                hunk.status = NodeStatus::Unbuilt;
+                hunk.rows = CachedRows::default();
+            }
+        }
+    }
+}
+
 fn build_base_layout(
     session: &DiffSession,
     inline_width: usize,
@@ -188,17 +257,15 @@ fn build_base_layout(
     let mut timer = log::timer("layout_build_base");
     timer.field("files", session.files.len());
     let mut tree = build_layout_tree(session, inline_width, side_by_side_width);
-    let window = apply_resident_hunk_window(
-        &mut tree,
-        session,
+        let window = apply_resident_hunk_window_sync(
+            &mut tree,
+            session,
         inline_width,
         side_by_side_width,
         selected_file,
         selected_hunk,
         viewport_rows,
         overscan_rows,
-        usize::MAX,
-        usize::MAX,
     );
     let (inline_rows, side_by_side_rows, row_contexts, hunk_ranges) = flatten_layout_tree(&tree);
 
@@ -445,12 +512,82 @@ struct WindowResult {
     built_hunks: usize,
     evicted_hunks: usize,
     built_rows: usize,
+    build_ms: u128,
     missing_hunks: usize,
     extra_hunks: usize,
+    queued_hunks: usize,
+    applied_hunks: usize,
+}
+
+fn apply_resident_hunk_window_sync(
+    tree: &mut LayoutTree,
+    session: &DiffSession,
+    inline_width: usize,
+    side_by_side_width: usize,
+    selected_file: usize,
+    selected_hunk: usize,
+    viewport_rows: usize,
+    overscan_rows: usize,
+) -> WindowResult {
+    let desired = resident_hunk_window(
+        session,
+        selected_file,
+        selected_hunk,
+        viewport_rows,
+        overscan_rows,
+    );
+    let mut changed = false;
+    let mut built_hunks = 0usize;
+    let mut built_rows = 0usize;
+
+    for (file_index, file) in session.files.iter().enumerate() {
+        let Some(file_node) = tree.files.get_mut(file_index) else {
+            continue;
+        };
+
+        for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+            if !desired.contains(&(file_index, hunk_index)) {
+                continue;
+            }
+            let Some(hunk_node) = file_node.hunks.get_mut(hunk_index) else {
+                continue;
+            };
+            if hunk_node.status == NodeStatus::Ready {
+                continue;
+            }
+
+            let node = build_hunk_node_for_worker(
+                file_index,
+                hunk_index,
+                &file.path,
+                hunk,
+                inline_width,
+                side_by_side_width,
+            );
+            built_rows += node.rows.row_contexts.len();
+            *hunk_node = node;
+            built_hunks += 1;
+            changed = true;
+        }
+    }
+
+    WindowResult {
+        changed,
+        built_hunks,
+        evicted_hunks: 0,
+        built_rows,
+        build_ms: 0,
+        missing_hunks: 0,
+        extra_hunks: 0,
+        queued_hunks: 0,
+        applied_hunks: 0,
+    }
 }
 
 fn apply_resident_hunk_window(
     tree: &mut LayoutTree,
+    worker: &LayoutWorker,
+    generation: u64,
     session: &DiffSession,
     inline_width: usize,
     side_by_side_width: usize,
@@ -472,48 +609,93 @@ fn apply_resident_hunk_window(
     let mut built_hunks = 0usize;
     let mut evicted_hunks = 0usize;
     let mut built_rows = 0usize;
+    let mut build_ms = 0u128;
     let mut missing_hunks = 0usize;
     let mut extra_hunks = 0usize;
+    let mut queued_hunks = 0usize;
+    let mut applied_hunks = 0usize;
+
+    for result in worker.drain_completed() {
+        if result.generation != generation {
+            continue;
+        }
+        if result.inline_width != inline_width || result.side_by_side_width != side_by_side_width {
+            continue;
+        }
+        let should_be_ready = desired.contains(&(result.file_index, result.hunk_index));
+        let Some(file_node) = tree.files.get_mut(result.file_index) else {
+            continue;
+        };
+        let Some(hunk_node) = file_node.hunks.get_mut(result.hunk_index) else {
+            continue;
+        };
+        if hunk_node.status != NodeStatus::Loading {
+            continue;
+        }
+
+        if should_be_ready {
+            built_rows += result.node.rows.row_contexts.len();
+            build_ms += result.build_ms;
+            *hunk_node = result.node;
+            applied_hunks += 1;
+            built_hunks += 1;
+            changed = true;
+        } else {
+            hunk_node.status = NodeStatus::Unbuilt;
+            hunk_node.rows = CachedRows::default();
+            changed = true;
+        }
+    }
 
     for (file_index, file_node) in tree.files.iter().enumerate() {
         for (hunk_index, hunk_node) in file_node.hunks.iter().enumerate() {
             let should_be_ready = desired.contains(&(file_index, hunk_index));
             match (hunk_node.status, should_be_ready) {
-                (NodeStatus::Unbuilt | NodeStatus::Dirty, true) => missing_hunks += 1,
+                (NodeStatus::Unbuilt | NodeStatus::Dirty | NodeStatus::Loading, true) => {
+                    if hunk_node.status != NodeStatus::Ready {
+                        missing_hunks += 1;
+                    }
+                }
                 (NodeStatus::Ready, false) => extra_hunks += 1,
                 _ => {}
             }
         }
     }
 
-    for (file_index, file) in session.files.iter().enumerate() {
-        let Some(file_node) = tree.files.get_mut(file_index) else {
-            continue;
-        };
-
-        for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-            let should_be_ready = desired.contains(&(file_index, hunk_index));
-            let Some(hunk_node) = file_node.hunks.get_mut(hunk_index) else {
+    if missing_hunks > 0 {
+        for (file_index, file) in session.files.iter().enumerate() {
+            let Some(file_node) = tree.files.get_mut(file_index) else {
                 continue;
             };
 
-            if should_be_ready
-                && matches!(hunk_node.status, NodeStatus::Unbuilt | NodeStatus::Dirty)
-                && built_hunks < max_builds
-            {
-                let mut highlighter = FileHighlighter::new(&file.path);
-                let built = build_hunk_node(
-                    file_index,
-                    hunk_index,
-                    hunk,
-                    inline_width,
-                    side_by_side_width,
-                    &mut highlighter,
-                );
-                built_rows += built.rows.row_contexts.len();
-                *hunk_node = built;
-                built_hunks += 1;
-                changed = true;
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                if queued_hunks >= max_builds {
+                    break;
+                }
+                let should_be_ready = desired.contains(&(file_index, hunk_index));
+                let Some(hunk_node) = file_node.hunks.get_mut(hunk_index) else {
+                    continue;
+                };
+
+                if should_be_ready
+                    && matches!(hunk_node.status, NodeStatus::Unbuilt | NodeStatus::Dirty)
+                {
+                    worker.request_hunk(HunkBuildRequest {
+                        generation,
+                        file_index,
+                        hunk_index,
+                        path: file.path.clone(),
+                        hunk: hunk.clone(),
+                        inline_width,
+                        side_by_side_width,
+                    });
+                    hunk_node.status = NodeStatus::Loading;
+                    queued_hunks += 1;
+                    missing_hunks = missing_hunks.saturating_sub(1);
+                }
+            }
+            if queued_hunks >= max_builds {
+                break;
             }
         }
     }
@@ -541,9 +723,31 @@ fn apply_resident_hunk_window(
         built_hunks,
         evicted_hunks,
         built_rows,
+        build_ms,
         missing_hunks: remaining_missing,
         extra_hunks: extra_hunks.saturating_sub(evicted_hunks),
+        queued_hunks,
+        applied_hunks,
     }
+}
+
+pub(crate) fn build_hunk_node_for_worker(
+    file_index: usize,
+    hunk_index: usize,
+    path: &str,
+    hunk: &crate::diff::DiffHunk,
+    inline_width: usize,
+    side_by_side_width: usize,
+) -> HunkNode {
+    let mut highlighter = FileHighlighter::new(path);
+    build_hunk_node(
+        file_index,
+        hunk_index,
+        hunk,
+        inline_width,
+        side_by_side_width,
+        &mut highlighter,
+    )
 }
 
 fn resident_hunk_window(

@@ -44,6 +44,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         ));
     } else if let Some(layout) = &mut app.layout {
         let _ = layout.ensure_hunk_window(
+            &app.layout_worker,
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
@@ -70,10 +71,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             app.main_pane.selection_anchor = None;
             app.main_pane.scroll = range.start.saturating_sub(previous_visual_offset) as u16;
         } else {
-            app.main_pane.cursor_row = 0;
-            app.main_pane.cursor_target = layout.row_contexts.first().copied();
-            app.main_pane.selection_anchor = None;
-            app.main_pane.scroll = 0;
+            app.main_pane.cursor_target = Some(context);
         }
     }
 }
@@ -99,6 +97,16 @@ pub fn max_cursor_row(app: &App) -> usize {
 }
 
 pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
+    if let Some(layout) = &mut app.layout {
+        let _ = layout.ensure_selected_hunk_ready_sync(
+            &app.session,
+            &app.notes.items,
+            &app.notes.expanded_ids,
+            app.main_pane.selected_file,
+            app.main_pane.selected_hunk,
+        );
+    }
+
     let Some(layout) = &app.layout else {
         return;
     };
