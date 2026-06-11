@@ -498,6 +498,15 @@ fn debug_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("Ready Hunks {}", ready_hunks)));
         lines.push(Line::from(format!("Pending Hunks {}", pending_hunks)));
         lines.push(Line::from(format!("Base Rows {}", layout.base.row_contexts.len())));
+        let direction = match app.global.nav_direction {
+            Some(crate::state::NavDirection::Up) => "up",
+            Some(crate::state::NavDirection::Down) => "down",
+            None => "-",
+        };
+        lines.push(Line::from(format!(
+            "Jump Target {}:{} {}",
+            layout.target_file, layout.target_hunk, direction
+        )));
     }
 
     if !lines.is_empty() {
