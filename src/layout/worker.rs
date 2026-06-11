@@ -93,3 +93,66 @@ impl LayoutWorker {
         results
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::diff::{DiffHunk, DiffLine};
+
+    #[test]
+    fn stale_requests_do_not_publish_results() {
+        let worker = LayoutWorker::new();
+        worker.set_generation(2);
+        worker.request_hunk(HunkBuildRequest {
+            generation: 1,
+            file_index: 0,
+            hunk_index: 0,
+            path: "test.rs".to_string(),
+            hunk: DiffHunk {
+                header: "@@ stale @@".to_string(),
+                lines: vec![DiffLine::Context {
+                    old_lineno: 1,
+                    new_lineno: 1,
+                    text: "stale".to_string(),
+                }],
+            },
+            inline_width: 80,
+            side_by_side_width: 80,
+        });
+        worker.request_hunk(HunkBuildRequest {
+            generation: 2,
+            file_index: 0,
+            hunk_index: 1,
+            path: "test.rs".to_string(),
+            hunk: DiffHunk {
+                header: "@@ current @@".to_string(),
+                lines: vec![DiffLine::Context {
+                    old_lineno: 2,
+                    new_lineno: 2,
+                    text: "current".to_string(),
+                }],
+            },
+            inline_width: 80,
+            side_by_side_width: 80,
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let result = loop {
+            if let Some(result) = worker.drain_completed().into_iter().next() {
+                break result;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not finish current request"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+
+        assert_eq!(result.generation, 2);
+        assert_eq!(result.hunk_index, 1);
+        assert!(worker.drain_completed().is_empty());
+    }
+}

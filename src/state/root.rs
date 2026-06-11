@@ -239,11 +239,13 @@ impl App {
             return;
         };
 
-        let Some(context @ RowContext {
-            file_index: Some(file_index),
-            hunk_index,
-            ..
-        }) = layout.row_contexts.get(self.main_pane.cursor_row).copied()
+        let Some(
+            context @ RowContext {
+                file_index: Some(file_index),
+                hunk_index,
+                ..
+            },
+        ) = layout.row_contexts.get(self.main_pane.cursor_row).copied()
         else {
             return;
         };
@@ -413,7 +415,10 @@ impl App {
         let Some(current) = layout.row_contexts.get(self.main_pane.cursor_row).copied() else {
             return false;
         };
-        let Some(next) = layout.row_contexts.get(self.main_pane.cursor_row.saturating_add(1)).copied()
+        let Some(next) = layout
+            .row_contexts
+            .get(self.main_pane.cursor_row.saturating_add(1))
+            .copied()
         else {
             return false;
         };
@@ -457,7 +462,11 @@ impl App {
         if self.main_pane.cursor_row == 0 {
             return false;
         }
-        let Some(previous) = layout.row_contexts.get(self.main_pane.cursor_row - 1).copied() else {
+        let Some(previous) = layout
+            .row_contexts
+            .get(self.main_pane.cursor_row - 1)
+            .copied()
+        else {
             return false;
         };
 
@@ -474,7 +483,8 @@ impl App {
         ) else {
             return false;
         };
-        let Some(target) = last_meaningful_row_context(&self.session, file_index, hunk_index) else {
+        let Some(target) = last_meaningful_row_context(&self.session, file_index, hunk_index)
+        else {
             return false;
         };
 
@@ -565,4 +575,120 @@ fn row_index_for_context(layout: &Layout, target: RowContext) -> Option<usize> {
             && context.new_lineno == target.new_lineno
             && context.note_id == target.note_id
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{DiffHunk, DiffLine};
+    use crate::layout::RowKind;
+
+    fn app_with_hunks(count: usize) -> App {
+        App::new(DiffSession {
+            files: vec![DiffFile {
+                path: "test.rs".to_string(),
+                old_path: "test.rs".to_string(),
+                new_path: "test.rs".to_string(),
+                hunks: (0..count)
+                    .map(|index| DiffHunk {
+                        header: format!("@@ hunk {index} @@"),
+                        lines: vec![DiffLine::Context {
+                            old_lineno: index + 1,
+                            new_lineno: index + 1,
+                            text: format!("line {index}"),
+                        }],
+                    })
+                    .collect(),
+            }],
+        })
+    }
+
+    fn row_for(layout: &Layout, hunk_index: usize, kind: RowKind) -> usize {
+        layout
+            .row_contexts
+            .iter()
+            .position(|context| context.hunk_index == Some(hunk_index) && context.kind == kind)
+            .unwrap()
+    }
+
+    #[test]
+    fn navigation_across_an_unloaded_hunk_preserves_the_target() {
+        let mut app = app_with_hunks(4);
+        let mut layout = Layout::build(&app.session, &[], &[], 80, 80, 0, 0, 1, 0, None);
+
+        layout.target_hunk = 1;
+        let boundary = row_for(&layout, 1, RowKind::Spacer);
+        app.layout = Some(layout);
+        app.main_pane.selected_hunk = 1;
+        app.main_pane.cursor_row = boundary;
+
+        let max_row = app.layout.as_ref().unwrap().row_contexts.len() - 1;
+        app.move_cursor_down(1, max_row);
+        assert_eq!(app.main_pane.selected_hunk, 2);
+
+        app.layout.as_mut().unwrap().ensure_hunk_window(
+            &app.layout_worker,
+            &app.session,
+            &[],
+            &[],
+            app.main_pane.selected_file,
+            app.main_pane.selected_hunk,
+            1,
+            0,
+            app.global.nav_direction,
+        );
+        let new_max_row = app.layout.as_ref().unwrap().row_contexts.len() - 1;
+        app.clamp_cursor_row(new_max_row);
+        app.sync_selection_to_cursor();
+
+        assert_eq!(app.main_pane.selected_hunk, 2);
+        assert_eq!(app.main_pane.cursor_target.unwrap().hunk_index, Some(2));
+    }
+
+    #[test]
+    fn materializing_rows_preserves_both_selection_endpoints() {
+        let mut app = app_with_hunks(3);
+        app.layout = Some(Layout::build(
+            &app.session,
+            &[],
+            &[],
+            80,
+            80,
+            0,
+            1,
+            1,
+            0,
+            None,
+        ));
+
+        let selected_context = RowContext {
+            file_index: Some(0),
+            hunk_index: Some(1),
+            kind: RowKind::DiffLine,
+            old_lineno: Some(2),
+            new_lineno: Some(2),
+            note_id: None,
+        };
+        let original_index =
+            row_index_for_context(app.layout.as_ref().unwrap(), selected_context).unwrap();
+        app.main_pane.cursor_row = original_index;
+        app.main_pane.cursor_target = Some(selected_context);
+        app.main_pane.selection_anchor = Some(original_index);
+
+        app.layout
+            .as_mut()
+            .unwrap()
+            .ensure_selected_hunk_ready_sync(&app.session, &[], &[], 0, 0);
+        let remapped_cursor =
+            row_index_for_context(app.layout.as_ref().unwrap(), selected_context).unwrap();
+        app.main_pane.cursor_row = remapped_cursor;
+
+        let anchor = app.main_pane.selection_anchor.unwrap();
+        let anchor_context = app.layout.as_ref().unwrap().row_contexts[anchor];
+        assert_eq!(anchor_context.file_index, selected_context.file_index);
+        assert_eq!(anchor_context.hunk_index, selected_context.hunk_index);
+        assert_eq!(anchor_context.kind, selected_context.kind);
+        assert_eq!(anchor_context.old_lineno, selected_context.old_lineno);
+        assert_eq!(anchor_context.new_lineno, selected_context.new_lineno);
+    }
 }
