@@ -7,7 +7,7 @@ pub struct HunkRange {
     pub start: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RowContext {
     pub file_index: Option<usize>,
     pub hunk_index: Option<usize>,
@@ -28,6 +28,44 @@ pub enum RowKind {
     Spacer,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RowId {
+    FileSeparator {
+        file_index: usize,
+    },
+    FileHeader {
+        file_index: usize,
+    },
+    HunkHeader {
+        file_index: usize,
+        hunk_index: usize,
+    },
+    DiffLine {
+        file_index: usize,
+        hunk_index: usize,
+        line_index: usize,
+    },
+    HunkSpacer {
+        file_index: usize,
+        hunk_index: usize,
+    },
+    FileSpacer {
+        file_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlannedRow {
+    pub id: RowId,
+    pub context: RowContext,
+}
+
+#[derive(Clone, Debug)]
+pub struct LayoutPlan {
+    pub rows: Vec<PlannedRow>,
+    pub hunk_ranges: Vec<HunkRange>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub inline_width: usize,
@@ -46,6 +84,7 @@ pub struct Layout {
 pub struct BaseLayout {
     #[allow(dead_code)]
     pub tree: LayoutTree,
+    pub plan: LayoutPlan,
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub hunk_ranges: Vec<HunkRange>,

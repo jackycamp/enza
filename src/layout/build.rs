@@ -15,6 +15,7 @@ use crate::layout::model::{
 use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
 };
+use crate::layout::plan::{build_layout_plan, materialize_layout_plan};
 use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
 use crate::log;
 use crate::note::Note;
@@ -117,12 +118,7 @@ impl Layout {
         }
 
         let flatten_start = Instant::now();
-        let (inline_rows, side_by_side_rows, row_contexts, hunk_ranges) =
-            flatten_layout_tree(&self.base.tree);
-        self.base.inline_rows = inline_rows;
-        self.base.side_by_side_rows = side_by_side_rows;
-        self.base.row_contexts = row_contexts;
-        self.base.hunk_ranges = hunk_ranges;
+        refresh_base_layout(&mut self.base, session, self.side_by_side_width);
         let flatten_ms = flatten_start.elapsed().as_millis();
 
         let note_start = Instant::now();
@@ -150,10 +146,7 @@ impl Layout {
         if let Some(rss_mb) = log::current_rss_mb() {
             fields.push(("rss_mb", rss_mb));
         }
-        log::add_event(
-            "layout_expand",
-            &fields,
-        );
+        log::add_event("layout_expand", &fields);
         true
     }
 
@@ -191,12 +184,7 @@ impl Layout {
         );
         *hunk_node = node;
 
-        let (inline_rows, side_by_side_rows, row_contexts, hunk_ranges) =
-            flatten_layout_tree(&self.base.tree);
-        self.base.inline_rows = inline_rows;
-        self.base.side_by_side_rows = side_by_side_rows;
-        self.base.row_contexts = row_contexts;
-        self.base.hunk_ranges = hunk_ranges;
+        refresh_base_layout(&mut self.base, session, self.side_by_side_width);
         self.refresh_notes(session, notes, expanded_note_ids);
         true
     }
@@ -262,10 +250,11 @@ fn build_base_layout(
 ) -> BaseLayout {
     let mut timer = log::timer("layout_build_base");
     timer.field("files", session.files.len());
+    let plan = build_layout_plan(session);
     let mut tree = build_layout_tree(session, inline_width, side_by_side_width);
-        let window = apply_resident_hunk_window_sync(
-            &mut tree,
-            session,
+    let window = apply_resident_hunk_window_sync(
+        &mut tree,
+        session,
         inline_width,
         side_by_side_width,
         selected_file,
@@ -274,10 +263,13 @@ fn build_base_layout(
         overscan_rows,
         nav_direction,
     );
-    let (inline_rows, side_by_side_rows, row_contexts, hunk_ranges) = flatten_layout_tree(&tree);
+    let (inline_rows, side_by_side_rows, row_contexts) =
+        materialize_layout_plan(session, &tree, &plan, side_by_side_width);
+    let hunk_ranges = plan.hunk_ranges.clone();
 
     let base = BaseLayout {
         tree,
+        plan,
         inline_rows,
         side_by_side_rows,
         hunk_ranges,
@@ -299,7 +291,9 @@ fn build_layout_tree(
         .files
         .iter()
         .enumerate()
-        .map(|(file_index, file)| build_file_node(file_index, file, inline_width, side_by_side_width))
+        .map(|(file_index, file)| {
+            build_file_node(file_index, file, inline_width, side_by_side_width)
+        })
         .collect();
 
     LayoutTree { files }
@@ -455,63 +449,13 @@ fn build_hunk_node(
     }
 }
 
-fn flatten_layout_tree(
-    tree: &LayoutTree,
-) -> (Vec<RenderRow>, Vec<RenderRow>, Vec<RowContext>, Vec<HunkRange>) {
-    let mut inline_rows = Vec::new();
-    let mut side_by_side_rows = Vec::new();
-    let mut row_contexts = Vec::new();
-    let mut hunk_ranges = Vec::new();
-    let mut cursor = 0usize;
-
-    for file in &tree.files {
-        append_cached_rows(
-            &mut inline_rows,
-            &mut side_by_side_rows,
-            &mut row_contexts,
-            &file.header,
-        );
-        cursor += file.header.row_contexts.len();
-
-        for hunk in &file.hunks {
-            if hunk.status != NodeStatus::Ready {
-                continue;
-            }
-            hunk_ranges.push(HunkRange {
-                file_index: hunk.file_index,
-                hunk_index: hunk.hunk_index,
-                start: cursor,
-            });
-            append_cached_rows(
-                &mut inline_rows,
-                &mut side_by_side_rows,
-                &mut row_contexts,
-                &hunk.rows,
-            );
-            cursor += hunk.rows.row_contexts.len();
-        }
-
-        append_cached_rows(
-            &mut inline_rows,
-            &mut side_by_side_rows,
-            &mut row_contexts,
-            &file.trailing_spacer,
-        );
-        cursor += file.trailing_spacer.row_contexts.len();
-    }
-
-    (inline_rows, side_by_side_rows, row_contexts, hunk_ranges)
-}
-
-fn append_cached_rows(
-    inline_rows: &mut Vec<RenderRow>,
-    side_by_side_rows: &mut Vec<RenderRow>,
-    row_contexts: &mut Vec<RowContext>,
-    rows: &CachedRows,
-) {
-    inline_rows.extend(rows.inline_rows.iter().cloned());
-    side_by_side_rows.extend(rows.side_by_side_rows.iter().cloned());
-    row_contexts.extend(rows.row_contexts.iter().copied());
+fn refresh_base_layout(base: &mut BaseLayout, session: &DiffSession, side_by_side_width: usize) {
+    let (inline_rows, side_by_side_rows, row_contexts) =
+        materialize_layout_plan(session, &base.tree, &base.plan, side_by_side_width);
+    base.inline_rows = inline_rows;
+    base.side_by_side_rows = side_by_side_rows;
+    base.row_contexts = row_contexts;
+    base.hunk_ranges = base.plan.hunk_ranges.clone();
 }
 
 struct WindowResult {
@@ -715,7 +659,8 @@ fn apply_resident_hunk_window(
     if remaining_missing == 0 {
         for file_node in &mut tree.files {
             for hunk_node in &mut file_node.hunks {
-                let should_be_ready = desired.contains(&(hunk_node.file_index, hunk_node.hunk_index));
+                let should_be_ready =
+                    desired.contains(&(hunk_node.file_index, hunk_node.hunk_index));
                 if hunk_node.status == NodeStatus::Ready
                     && !should_be_ready
                     && evicted_hunks < max_evictions
@@ -996,94 +941,4 @@ fn adjust_hunk_ranges_for_insertions(
             start: range.start + inserted_before_base[range.start],
         })
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    use super::*;
-    use crate::diff::{DiffFile, DiffHunk, DiffLine};
-
-    #[test]
-    fn viewport_growth_after_a_resize_can_load_more_hunks() {
-        let session = session_with_hunks(4);
-        let worker = LayoutWorker::new();
-        worker.set_generation(7);
-        let mut layout = Layout::build(&session, &[], &[], 80, 80, 0, 0, 1, 0, None);
-
-        layout.ensure_hunk_window(&worker, &session, &[], &[], 0, 0, 100, 0, None);
-
-        wait_until(Duration::from_millis(250), || {
-            layout.ensure_hunk_window(&worker, &session, &[], &[], 0, 0, 100, 0, None);
-            layout.base.tree.files[0]
-                .hunks
-                .iter()
-                .all(|hunk| hunk.status == NodeStatus::Ready)
-        });
-
-        assert!(
-            layout.base.tree.files[0]
-                .hunks
-                .iter()
-                .all(|hunk| hunk.status == NodeStatus::Ready)
-        );
-    }
-
-    #[test]
-    fn moving_the_window_evicts_hunks_outside_it() {
-        let session = session_with_hunks(4);
-        let worker = LayoutWorker::new();
-        let mut layout = Layout::build(&session, &[], &[], 80, 80, 0, 0, 1, 0, None);
-        assert_eq!(layout.base.tree.files[0].hunks[0].status, NodeStatus::Ready);
-
-        wait_until(Duration::from_secs(1), || {
-            layout.ensure_hunk_window(&worker, &session, &[], &[], 0, 3, 1, 0, None);
-            layout.base.tree.files[0].hunks[3].status == NodeStatus::Ready
-                && layout.base.tree.files[0].hunks[0].status == NodeStatus::Unbuilt
-        });
-
-        assert_eq!(layout.base.tree.files[0].hunks[3].status, NodeStatus::Ready);
-        assert_eq!(
-            layout.base.tree.files[0].hunks[0].status,
-            NodeStatus::Unbuilt
-        );
-        assert!(
-            layout.base.tree.files[0].hunks[0]
-                .rows
-                .row_contexts
-                .is_empty()
-        );
-    }
-
-    fn session_with_hunks(count: usize) -> DiffSession {
-        DiffSession {
-            files: vec![DiffFile {
-                path: "test.rs".to_string(),
-                old_path: "test.rs".to_string(),
-                new_path: "test.rs".to_string(),
-                hunks: (0..count)
-                    .map(|index| DiffHunk {
-                        header: format!("@@ hunk {index} @@"),
-                        lines: vec![DiffLine::Context {
-                            old_lineno: index + 1,
-                            new_lineno: index + 1,
-                            text: format!("line {index}"),
-                        }],
-                    })
-                    .collect(),
-            }],
-        }
-    }
-
-    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if condition() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
 }

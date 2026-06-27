@@ -9,6 +9,7 @@ mod render;
 mod state;
 
 use std::io;
+use std::path::Path;
 use std::time::Instant;
 
 use clap::Parser;
@@ -59,7 +60,7 @@ fn run_app(
     diff_target: &crate::diff::DiffTarget,
     diff_filter: Option<&crate::diff::DiffFilter>,
 ) -> io::Result<()> {
-    let repo_path = cli.repo.as_deref().unwrap_or(std::path::Path::new("."));
+    let repo_path = cli.repo.as_deref().unwrap_or(Path::new("."));
     let mut diff_load = log::timer("diff_load");
     let session =
         DiffSession::load_from_repo(repo_path, diff_target, diff_filter).unwrap_or_default();

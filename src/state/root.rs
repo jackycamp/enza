@@ -190,6 +190,7 @@ impl App {
             }
             self.main_pane.cursor_row = (self.main_pane.cursor_row + 1).min(max_row);
             self.capture_cursor_target();
+            self.sync_selection_to_cursor();
         }
     }
 
@@ -201,6 +202,7 @@ impl App {
             }
             self.main_pane.cursor_row = self.main_pane.cursor_row.saturating_sub(1);
             self.capture_cursor_target();
+            self.sync_selection_to_cursor();
         }
     }
 
