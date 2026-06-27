@@ -7,6 +7,12 @@ use crate::layout::model::{
     RowId, RowKind,
 };
 
+pub(super) struct LayoutRenderRows {
+    pub inline_rows: Vec<RenderRow>,
+    pub side_by_side_rows: Vec<RenderRow>,
+    pub row_contexts: Vec<RowContext>,
+}
+
 pub(super) fn build_layout_plan(session: &DiffSession) -> LayoutPlan {
     let mut rows = Vec::new();
     let mut hunk_ranges = Vec::new();
@@ -107,12 +113,12 @@ pub(super) fn build_layout_plan(session: &DiffSession) -> LayoutPlan {
     LayoutPlan { rows, hunk_ranges }
 }
 
-pub(super) fn materialize_layout_plan(
+pub(super) fn layout_plan_to_render_rows(
     session: &DiffSession,
     tree: &LayoutTree,
     plan: &LayoutPlan,
     side_by_side_width: usize,
-) -> (Vec<RenderRow>, Vec<RenderRow>, Vec<RowContext>) {
+) -> LayoutRenderRows {
     let mut inline_rows = Vec::with_capacity(plan.rows.len());
     let mut side_by_side_rows = Vec::with_capacity(plan.rows.len());
 
@@ -123,11 +129,11 @@ pub(super) fn materialize_layout_plan(
         side_by_side_rows.push(side_by_side);
     }
 
-    (
+    LayoutRenderRows {
         inline_rows,
         side_by_side_rows,
-        plan.rows.iter().map(|row| row.context).collect(),
-    )
+        row_contexts: plan.rows.iter().map(|row| row.context).collect(),
+    }
 }
 
 fn materialize_planned_row(

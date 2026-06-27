@@ -15,7 +15,7 @@ use crate::layout::model::{
 use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
 };
-use crate::layout::plan::{build_layout_plan, materialize_layout_plan};
+use crate::layout::plan::{build_layout_plan, layout_plan_to_render_rows};
 use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
 use crate::log;
 use crate::note::Note;
@@ -263,17 +263,16 @@ fn build_base_layout(
         overscan_rows,
         nav_direction,
     );
-    let (inline_rows, side_by_side_rows, row_contexts) =
-        materialize_layout_plan(session, &tree, &plan, side_by_side_width);
+    let render_rows = layout_plan_to_render_rows(session, &tree, &plan, side_by_side_width);
     let hunk_ranges = plan.hunk_ranges.clone();
 
     let base = BaseLayout {
         tree,
         plan,
-        inline_rows,
-        side_by_side_rows,
+        inline_rows: render_rows.inline_rows,
+        side_by_side_rows: render_rows.side_by_side_rows,
         hunk_ranges,
-        row_contexts,
+        row_contexts: render_rows.row_contexts,
     };
     timer.field("base_rows", base.row_contexts.len());
     timer.field("hunk_ranges", base.hunk_ranges.len());
@@ -450,11 +449,11 @@ fn build_hunk_node(
 }
 
 fn refresh_base_layout(base: &mut BaseLayout, session: &DiffSession, side_by_side_width: usize) {
-    let (inline_rows, side_by_side_rows, row_contexts) =
-        materialize_layout_plan(session, &base.tree, &base.plan, side_by_side_width);
-    base.inline_rows = inline_rows;
-    base.side_by_side_rows = side_by_side_rows;
-    base.row_contexts = row_contexts;
+    let render_rows =
+        layout_plan_to_render_rows(session, &base.tree, &base.plan, side_by_side_width);
+    base.inline_rows = render_rows.inline_rows;
+    base.side_by_side_rows = render_rows.side_by_side_rows;
+    base.row_contexts = render_rows.row_contexts;
     base.hunk_ranges = base.plan.hunk_ranges.clone();
 }
 
