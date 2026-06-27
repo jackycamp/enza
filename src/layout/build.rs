@@ -16,10 +16,13 @@ use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
 };
 use crate::layout::plan::{build_layout_plan, plan_row_contexts};
-use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
+use crate::layout::window::{
+    HunkWindowTarget, LayoutBuildOptions, LayoutWidths, WindowLimits, apply_resident_hunk_window,
+    apply_resident_hunk_window_sync,
+};
+use crate::layout::worker::LayoutWorker;
 use crate::log;
 use crate::note::Note;
-use crate::state::NavDirection;
 
 struct NoteOverlay {
     insertions: Vec<NoteInsertion>,
@@ -28,44 +31,29 @@ struct NoteOverlay {
 }
 
 impl Layout {
-    // FIXME: Has way to many arguments
     pub fn build(
         session: &DiffSession,
         notes: &[Note],
         expanded_note_ids: &[u64],
-        inline_width: usize,
-        side_by_side_width: usize,
-        selected_file: usize,
-        selected_hunk: usize,
-        viewport_rows: usize,
-        overscan_rows: usize,
-        nav_direction: Option<NavDirection>,
+        options: LayoutBuildOptions,
     ) -> Self {
         let mut timer = log::timer("layout_build");
         timer.field("files", session.files.len());
         timer.field("notes", notes.len());
-        timer.field("inline_width", inline_width);
-        timer.field("side_width", side_by_side_width);
-        timer.field("selected_file", selected_file);
-        timer.field("selected_hunk", selected_hunk);
-        timer.field("viewport_rows", viewport_rows);
-        timer.field("overscan_rows", overscan_rows);
-        let base = build_base_layout(
-            session,
-            inline_width,
-            side_by_side_width,
-            selected_file,
-            selected_hunk,
-            viewport_rows,
-            overscan_rows,
-            nav_direction,
-        );
+        timer.field("inline_width", options.widths.inline);
+        timer.field("side_width", options.widths.side_by_side);
+        timer.field("selected_file", options.target.selected_file);
+        timer.field("selected_hunk", options.target.selected_hunk);
+        timer.field("viewport_rows", options.target.viewport_rows);
+        timer.field("overscan_rows", options.target.overscan_rows);
+
+        let base = build_base_layout(session, options.widths, options.target);
         let mut layout = Self {
-            inline_width,
-            side_by_side_width,
+            inline_width: options.widths.inline,
+            side_by_side_width: options.widths.side_by_side,
             target_generation: 0,
-            target_file: selected_file,
-            target_hunk: selected_hunk,
+            target_file: options.target.selected_file,
+            target_hunk: options.target.selected_hunk,
             base,
             hunk_ranges: Vec::new(),
             note_insertions: Vec::new(),
@@ -77,23 +65,18 @@ impl Layout {
         layout
     }
 
-    // FIXME: Again, way too many arguments
     pub fn ensure_hunk_window(
         &mut self,
         worker: &LayoutWorker,
         session: &DiffSession,
         notes: &[Note],
         expanded_note_ids: &[u64],
-        selected_file: usize,
-        selected_hunk: usize,
-        viewport_rows: usize,
-        overscan_rows: usize,
-        nav_direction: Option<NavDirection>,
+        target: HunkWindowTarget,
     ) -> bool {
-        if self.target_file != selected_file || self.target_hunk != selected_hunk {
+        if self.target_file != target.selected_file || self.target_hunk != target.selected_hunk {
             self.target_generation = self.target_generation.wrapping_add(1);
-            self.target_file = selected_file;
-            self.target_hunk = selected_hunk;
+            self.target_file = target.selected_file;
+            self.target_hunk = target.selected_hunk;
             reset_loading_hunks(&mut self.base.tree);
             worker.set_generation(self.target_generation);
         }
@@ -103,15 +86,15 @@ impl Layout {
             worker,
             self.target_generation,
             session,
-            self.inline_width,
-            self.side_by_side_width,
-            selected_file,
-            selected_hunk,
-            viewport_rows,
-            overscan_rows,
-            nav_direction,
-            2,
-            1,
+            LayoutWidths {
+                inline: self.inline_width,
+                side_by_side: self.side_by_side_width,
+            },
+            target,
+            WindowLimits {
+                max_builds: 2,
+                max_evictions: 1,
+            },
         );
         if !window.changed {
             return false;
@@ -125,10 +108,10 @@ impl Layout {
         let note_ms = note_start.elapsed().as_millis();
         let mut fields = vec![
             ("elapsed_ms", expand_start.elapsed().as_millis().to_string()),
-            ("selected_file", selected_file.to_string()),
-            ("selected_hunk", selected_hunk.to_string()),
-            ("viewport_rows", viewport_rows.to_string()),
-            ("overscan_rows", overscan_rows.to_string()),
+            ("selected_file", target.selected_file.to_string()),
+            ("selected_hunk", target.selected_hunk.to_string()),
+            ("viewport_rows", target.viewport_rows.to_string()),
+            ("overscan_rows", target.overscan_rows.to_string()),
             ("built_hunks", window.built_hunks.to_string()),
             ("evicted_hunks", window.evicted_hunks.to_string()),
             ("built_rows", window.built_rows.to_string()),
@@ -227,32 +210,16 @@ fn reset_loading_hunks(tree: &mut LayoutTree) {
     }
 }
 
-// FIXME: Why so many arguments
 fn build_base_layout(
     session: &DiffSession,
-    inline_width: usize,
-    side_by_side_width: usize,
-    selected_file: usize,
-    selected_hunk: usize,
-    viewport_rows: usize,
-    overscan_rows: usize,
-    nav_direction: Option<NavDirection>,
+    widths: LayoutWidths,
+    target: HunkWindowTarget,
 ) -> BaseLayout {
     let mut timer = log::timer("layout_build_base");
     timer.field("files", session.files.len());
     let plan = build_layout_plan(session);
-    let mut tree = build_layout_tree(session, inline_width, side_by_side_width);
-    let window = apply_resident_hunk_window_sync(
-        &mut tree,
-        session,
-        inline_width,
-        side_by_side_width,
-        selected_file,
-        selected_hunk,
-        viewport_rows,
-        overscan_rows,
-        nav_direction,
-    );
+    let mut tree = build_layout_tree(session, widths.inline, widths.side_by_side);
+    let window = apply_resident_hunk_window_sync(&mut tree, session, widths, target);
     let hunk_ranges = plan.hunk_ranges.clone();
 
     let base = BaseLayout {
@@ -434,237 +401,6 @@ fn build_hunk_node(
     }
 }
 
-struct WindowResult {
-    changed: bool,
-    built_hunks: usize,
-    evicted_hunks: usize,
-    built_rows: usize,
-    build_ms: u128,
-    missing_hunks: usize,
-    extra_hunks: usize,
-    queued_hunks: usize,
-    applied_hunks: usize,
-}
-
-// FIXME: too many arguments
-fn apply_resident_hunk_window_sync(
-    tree: &mut LayoutTree,
-    session: &DiffSession,
-    inline_width: usize,
-    side_by_side_width: usize,
-    selected_file: usize,
-    selected_hunk: usize,
-    viewport_rows: usize,
-    overscan_rows: usize,
-    nav_direction: Option<NavDirection>,
-) -> WindowResult {
-    let desired = resident_hunk_window(
-        session,
-        selected_file,
-        selected_hunk,
-        viewport_rows,
-        overscan_rows,
-        nav_direction,
-    );
-    let mut changed = false;
-    let mut built_hunks = 0usize;
-    let mut built_rows = 0usize;
-
-    for (file_index, file) in session.files.iter().enumerate() {
-        let Some(file_node) = tree.files.get_mut(file_index) else {
-            continue;
-        };
-
-        for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-            if !desired.contains(&(file_index, hunk_index)) {
-                continue;
-            }
-            let Some(hunk_node) = file_node.hunks.get_mut(hunk_index) else {
-                continue;
-            };
-            if hunk_node.status == NodeStatus::Ready {
-                continue;
-            }
-
-            let node = build_hunk_node_for_worker(
-                file_index,
-                hunk_index,
-                &file.path,
-                hunk,
-                inline_width,
-                side_by_side_width,
-            );
-            built_rows += node.rows.row_contexts.len();
-            *hunk_node = node;
-            built_hunks += 1;
-            changed = true;
-        }
-    }
-
-    WindowResult {
-        changed,
-        built_hunks,
-        evicted_hunks: 0,
-        built_rows,
-        build_ms: 0,
-        missing_hunks: 0,
-        extra_hunks: 0,
-        queued_hunks: 0,
-        applied_hunks: 0,
-    }
-}
-
-// FIXME: Too many arguments
-fn apply_resident_hunk_window(
-    tree: &mut LayoutTree,
-    worker: &LayoutWorker,
-    generation: u64,
-    session: &DiffSession,
-    inline_width: usize,
-    side_by_side_width: usize,
-    selected_file: usize,
-    selected_hunk: usize,
-    viewport_rows: usize,
-    overscan_rows: usize,
-    nav_direction: Option<NavDirection>,
-    max_builds: usize,
-    max_evictions: usize,
-) -> WindowResult {
-    let desired = resident_hunk_window(
-        session,
-        selected_file,
-        selected_hunk,
-        viewport_rows,
-        overscan_rows,
-        nav_direction,
-    );
-    let mut changed = false;
-    let mut built_hunks = 0usize;
-    let mut evicted_hunks = 0usize;
-    let mut built_rows = 0usize;
-    let mut build_ms = 0u128;
-    let mut missing_hunks = 0usize;
-    let mut extra_hunks = 0usize;
-    let mut queued_hunks = 0usize;
-    let mut applied_hunks = 0usize;
-
-    for result in worker.drain_completed() {
-        if result.generation != generation {
-            continue;
-        }
-        if result.inline_width != inline_width || result.side_by_side_width != side_by_side_width {
-            continue;
-        }
-        let should_be_ready = desired.contains(&(result.file_index, result.hunk_index));
-        let Some(file_node) = tree.files.get_mut(result.file_index) else {
-            continue;
-        };
-        let Some(hunk_node) = file_node.hunks.get_mut(result.hunk_index) else {
-            continue;
-        };
-        if hunk_node.status != NodeStatus::Loading {
-            continue;
-        }
-
-        if should_be_ready {
-            built_rows += result.node.rows.row_contexts.len();
-            build_ms += result.build_ms;
-            *hunk_node = result.node;
-            applied_hunks += 1;
-            built_hunks += 1;
-            changed = true;
-        } else {
-            hunk_node.status = NodeStatus::Unbuilt;
-            hunk_node.rows = CachedRows::default();
-            changed = true;
-        }
-    }
-
-    for (file_index, file_node) in tree.files.iter().enumerate() {
-        for (hunk_index, hunk_node) in file_node.hunks.iter().enumerate() {
-            let should_be_ready = desired.contains(&(file_index, hunk_index));
-            match (hunk_node.status, should_be_ready) {
-                (NodeStatus::Unbuilt | NodeStatus::Dirty | NodeStatus::Loading, true) => {
-                    if hunk_node.status != NodeStatus::Ready {
-                        missing_hunks += 1;
-                    }
-                }
-                (NodeStatus::Ready, false) => extra_hunks += 1,
-                _ => {}
-            }
-        }
-    }
-
-    if missing_hunks > 0 {
-        for (file_index, file) in session.files.iter().enumerate() {
-            let Some(file_node) = tree.files.get_mut(file_index) else {
-                continue;
-            };
-
-            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-                if queued_hunks >= max_builds {
-                    break;
-                }
-                let should_be_ready = desired.contains(&(file_index, hunk_index));
-                let Some(hunk_node) = file_node.hunks.get_mut(hunk_index) else {
-                    continue;
-                };
-
-                if should_be_ready
-                    && matches!(hunk_node.status, NodeStatus::Unbuilt | NodeStatus::Dirty)
-                {
-                    worker.request_hunk(HunkBuildRequest {
-                        generation,
-                        file_index,
-                        hunk_index,
-                        path: file.path.clone(),
-                        hunk: hunk.clone(),
-                        inline_width,
-                        side_by_side_width,
-                    });
-                    hunk_node.status = NodeStatus::Loading;
-                    queued_hunks += 1;
-                    missing_hunks = missing_hunks.saturating_sub(1);
-                }
-            }
-            if queued_hunks >= max_builds {
-                break;
-            }
-        }
-    }
-
-    let remaining_missing = missing_hunks.saturating_sub(built_hunks);
-    if remaining_missing == 0 {
-        for file_node in &mut tree.files {
-            for hunk_node in &mut file_node.hunks {
-                let should_be_ready =
-                    desired.contains(&(hunk_node.file_index, hunk_node.hunk_index));
-                if hunk_node.status == NodeStatus::Ready
-                    && !should_be_ready
-                    && evicted_hunks < max_evictions
-                {
-                    hunk_node.status = NodeStatus::Unbuilt;
-                    hunk_node.rows = CachedRows::default();
-                    evicted_hunks += 1;
-                    changed = true;
-                }
-            }
-        }
-    }
-
-    WindowResult {
-        changed,
-        built_hunks,
-        evicted_hunks,
-        built_rows,
-        build_ms,
-        missing_hunks: remaining_missing,
-        extra_hunks: extra_hunks.saturating_sub(evicted_hunks),
-        queued_hunks,
-        applied_hunks,
-    }
-}
-
 pub(crate) fn build_hunk_node_for_worker(
     file_index: usize,
     hunk_index: usize,
@@ -682,147 +418,6 @@ pub(crate) fn build_hunk_node_for_worker(
         side_by_side_width,
         &mut highlighter,
     )
-}
-
-fn resident_hunk_window(
-    session: &DiffSession,
-    selected_file: usize,
-    selected_hunk: usize,
-    viewport_rows: usize,
-    overscan_rows: usize,
-    nav_direction: Option<NavDirection>,
-) -> std::collections::HashSet<(usize, usize)> {
-    let all_hunks: Vec<(usize, usize, usize)> = session
-        .files
-        .iter()
-        .enumerate()
-        .flat_map(|(file_index, file)| {
-            file.hunks
-                .iter()
-                .enumerate()
-                .map(move |(hunk_index, hunk)| (file_index, hunk_index, hunk.lines.len() + 2))
-        })
-        .collect();
-
-    if all_hunks.is_empty() {
-        return std::collections::HashSet::new();
-    }
-
-    let selected_index = all_hunks
-        .iter()
-        .position(|&(file_index, hunk_index, _)| {
-            file_index == selected_file && hunk_index == selected_hunk
-        })
-        .unwrap_or(0);
-    let mut desired = std::collections::HashSet::new();
-    let mut before_rows = 0usize;
-    let mut after_rows = 0usize;
-    let current = all_hunks[selected_index];
-    desired.insert((current.0, current.1));
-
-    let before_target = overscan_rows;
-    let after_target = viewport_rows.saturating_add(overscan_rows);
-    let mut previous_index = selected_index.checked_sub(1);
-    let mut next_index = selected_index + 1;
-
-    while before_rows < before_target || after_rows < after_target {
-        let mut progressed = false;
-        let prefer_up = matches!(nav_direction, Some(NavDirection::Up));
-        let prefer_down = matches!(nav_direction, Some(NavDirection::Down));
-
-        if prefer_up {
-            progressed |= try_extend_up(
-                &all_hunks,
-                &mut desired,
-                &mut before_rows,
-                before_target,
-                &mut previous_index,
-            );
-            progressed |= try_extend_down(
-                &all_hunks,
-                &mut desired,
-                &mut after_rows,
-                after_target,
-                &mut next_index,
-            );
-        } else if prefer_down {
-            // FIXME: this if has identical blocks
-            progressed |= try_extend_down(
-                &all_hunks,
-                &mut desired,
-                &mut after_rows,
-                after_target,
-                &mut next_index,
-            );
-            progressed |= try_extend_up(
-                &all_hunks,
-                &mut desired,
-                &mut before_rows,
-                before_target,
-                &mut previous_index,
-            );
-        } else {
-            progressed |= try_extend_down(
-                &all_hunks,
-                &mut desired,
-                &mut after_rows,
-                after_target,
-                &mut next_index,
-            );
-            progressed |= try_extend_up(
-                &all_hunks,
-                &mut desired,
-                &mut before_rows,
-                before_target,
-                &mut previous_index,
-            );
-        }
-
-        if !progressed {
-            break;
-        }
-    }
-
-    desired
-}
-
-fn try_extend_down(
-    all_hunks: &[(usize, usize, usize)],
-    desired: &mut std::collections::HashSet<(usize, usize)>,
-    covered_rows: &mut usize,
-    target_rows: usize,
-    next_index: &mut usize,
-) -> bool {
-    if *covered_rows >= target_rows || *next_index >= all_hunks.len() {
-        return false;
-    }
-
-    let next = all_hunks[*next_index];
-    desired.insert((next.0, next.1));
-    *covered_rows += next.2;
-    *next_index += 1;
-    true
-}
-
-fn try_extend_up(
-    all_hunks: &[(usize, usize, usize)],
-    desired: &mut std::collections::HashSet<(usize, usize)>,
-    covered_rows: &mut usize,
-    target_rows: usize,
-    previous_index: &mut Option<usize>,
-) -> bool {
-    if *covered_rows >= target_rows {
-        return false;
-    }
-    let Some(index) = *previous_index else {
-        return false;
-    };
-
-    let previous = all_hunks[index];
-    desired.insert((previous.0, previous.1));
-    *covered_rows += previous.2;
-    *previous_index = index.checked_sub(1);
-    true
 }
 
 fn inject_notes(

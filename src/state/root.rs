@@ -574,7 +574,7 @@ fn row_index_for_context(
 mod tests {
     use super::*;
     use crate::diff::{DiffHunk, DiffLine};
-    use crate::layout::RowKind;
+    use crate::layout::{HunkWindowTarget, LayoutBuildOptions, LayoutWidths, RowKind};
 
     fn app_with_hunks(count: usize) -> App {
         App::new(DiffSession {
@@ -604,10 +604,40 @@ mod tests {
             .unwrap()
     }
 
+    fn build_options(
+        selected_hunk: usize,
+        viewport_rows: usize,
+        overscan_rows: usize,
+        nav_direction: Option<NavDirection>,
+    ) -> LayoutBuildOptions {
+        LayoutBuildOptions {
+            widths: LayoutWidths {
+                inline: 80,
+                side_by_side: 80,
+            },
+            target: window_target(selected_hunk, viewport_rows, overscan_rows, nav_direction),
+        }
+    }
+
+    fn window_target(
+        selected_hunk: usize,
+        viewport_rows: usize,
+        overscan_rows: usize,
+        nav_direction: Option<NavDirection>,
+    ) -> HunkWindowTarget {
+        HunkWindowTarget {
+            selected_file: 0,
+            selected_hunk,
+            viewport_rows,
+            overscan_rows,
+            nav_direction,
+        }
+    }
+
     #[test]
     fn navigation_across_an_unloaded_hunk_preserves_the_target() {
         let mut app = app_with_hunks(4);
-        let mut layout = Layout::build(&app.session, &[], &[], 80, 80, 0, 0, 1, 0, None);
+        let mut layout = Layout::build(&app.session, &[], &[], build_options(0, 1, 0, None));
 
         layout.target_hunk = 1;
         let boundary = row_for(&app.session, &layout, 1, RowKind::Spacer);
@@ -624,11 +654,7 @@ mod tests {
             &app.session,
             &[],
             &[],
-            app.main_pane.selected_file,
-            app.main_pane.selected_hunk,
-            1,
-            0,
-            app.global.nav_direction,
+            window_target(app.main_pane.selected_hunk, 1, 0, app.global.nav_direction),
         );
         let new_max_row = app.layout.as_ref().unwrap().row_count - 1;
         app.clamp_cursor_row(new_max_row);
@@ -645,13 +671,7 @@ mod tests {
             &app.session,
             &[],
             &[],
-            80,
-            80,
-            0,
-            1,
-            1,
-            0,
-            None,
+            build_options(1, 1, 0, None),
         ));
 
         let selected_context = RowContext {

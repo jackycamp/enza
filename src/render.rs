@@ -6,7 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::layout::{Layout as DiffLayout, NodeStatus, RowViewState};
+use crate::layout::{
+    HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
+    RowViewState,
+};
 use crate::log;
 use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
@@ -17,6 +20,17 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
     let (inline_width, side_width) = render_widths(app, area);
     let viewport_rows = viewport_line_capacity(app, area).max(1);
     let overscan_rows = viewport_rows.saturating_mul(OVERSCAN_MULTIPLIER);
+    let widths = LayoutWidths {
+        inline: inline_width,
+        side_by_side: side_width,
+    };
+    let target = HunkWindowTarget {
+        selected_file: app.main_pane.selected_file,
+        selected_hunk: app.main_pane.selected_hunk,
+        viewport_rows,
+        overscan_rows,
+        nav_direction: app.global.nav_direction,
+    };
     let needs_rebuild = app.layout.as_ref().is_none_or(|layout| {
         layout.inline_width != inline_width || layout.side_by_side_width != side_width
     });
@@ -35,13 +49,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
-            inline_width,
-            side_width,
-            app.main_pane.selected_file,
-            app.main_pane.selected_hunk,
-            viewport_rows,
-            overscan_rows,
-            app.global.nav_direction,
+            LayoutBuildOptions { widths, target },
         ));
     } else if let Some(layout) = &mut app.layout {
         let _ = layout.ensure_hunk_window(
@@ -49,11 +57,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
-            app.main_pane.selected_file,
-            app.main_pane.selected_hunk,
-            viewport_rows,
-            overscan_rows,
-            app.global.nav_direction,
+            target,
         );
     }
 

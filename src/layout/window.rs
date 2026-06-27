@@ -1,0 +1,457 @@
+use std::collections::HashSet;
+
+use crate::diff::DiffSession;
+use crate::layout::build::build_hunk_node_for_worker;
+use crate::layout::model::{CachedRows, LayoutTree, NodeStatus};
+use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
+use crate::state::NavDirection;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LayoutWidths {
+    pub inline: usize,
+    pub side_by_side: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HunkWindowTarget {
+    pub selected_file: usize,
+    pub selected_hunk: usize,
+    pub viewport_rows: usize,
+    pub overscan_rows: usize,
+    pub nav_direction: Option<NavDirection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LayoutBuildOptions {
+    pub widths: LayoutWidths,
+    pub target: HunkWindowTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowLimits {
+    pub max_builds: usize,
+    pub max_evictions: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct WindowResult {
+    pub changed: bool,
+    pub built_hunks: usize,
+    pub evicted_hunks: usize,
+    pub built_rows: usize,
+    pub build_ms: u128,
+    pub missing_hunks: usize,
+    pub extra_hunks: usize,
+    pub queued_hunks: usize,
+    pub applied_hunks: usize,
+}
+
+struct ResidentHunkPlan {
+    desired: HashSet<(usize, usize)>,
+}
+
+impl ResidentHunkPlan {
+    fn contains(&self, file_index: usize, hunk_index: usize) -> bool {
+        self.desired.contains(&(file_index, hunk_index))
+    }
+}
+
+pub(super) fn apply_resident_hunk_window_sync(
+    tree: &mut LayoutTree,
+    session: &DiffSession,
+    widths: LayoutWidths,
+    target: HunkWindowTarget,
+) -> WindowResult {
+    let plan = plan_resident_hunk_window(session, target);
+    let mut changed = false;
+    let mut built_hunks = 0usize;
+    let mut built_rows = 0usize;
+
+    for (file_index, file) in session.files.iter().enumerate() {
+        let Some(file_node) = tree.files.get_mut(file_index) else {
+            continue;
+        };
+
+        for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+            if !plan.contains(file_index, hunk_index) {
+                continue;
+            }
+            let Some(hunk_node) = file_node.hunks.get_mut(hunk_index) else {
+                continue;
+            };
+            if hunk_node.status == NodeStatus::Ready {
+                continue;
+            }
+
+            let node = build_hunk_node_for_worker(
+                file_index,
+                hunk_index,
+                &file.path,
+                hunk,
+                widths.inline,
+                widths.side_by_side,
+            );
+            built_rows += node.rows.row_contexts.len();
+            *hunk_node = node;
+            built_hunks += 1;
+            changed = true;
+        }
+    }
+
+    WindowResult {
+        changed,
+        built_hunks,
+        evicted_hunks: 0,
+        built_rows,
+        build_ms: 0,
+        missing_hunks: 0,
+        extra_hunks: 0,
+        queued_hunks: 0,
+        applied_hunks: 0,
+    }
+}
+
+pub(super) fn apply_resident_hunk_window(
+    tree: &mut LayoutTree,
+    worker: &LayoutWorker,
+    generation: u64,
+    session: &DiffSession,
+    widths: LayoutWidths,
+    target: HunkWindowTarget,
+    limits: WindowLimits,
+) -> WindowResult {
+    let plan = plan_resident_hunk_window(session, target);
+    let mut changed = false;
+    let mut built_hunks = 0usize;
+    let mut evicted_hunks = 0usize;
+    let mut built_rows = 0usize;
+    let mut build_ms = 0u128;
+    let mut missing_hunks = 0usize;
+    let mut extra_hunks = 0usize;
+    let mut queued_hunks = 0usize;
+    let mut applied_hunks = 0usize;
+
+    for result in worker.drain_completed() {
+        if result.generation != generation {
+            continue;
+        }
+        if result.inline_width != widths.inline || result.side_by_side_width != widths.side_by_side
+        {
+            continue;
+        }
+        let should_be_ready = plan.contains(result.file_index, result.hunk_index);
+        let Some(file_node) = tree.files.get_mut(result.file_index) else {
+            continue;
+        };
+        let Some(hunk_node) = file_node.hunks.get_mut(result.hunk_index) else {
+            continue;
+        };
+        if hunk_node.status != NodeStatus::Loading {
+            continue;
+        }
+
+        if should_be_ready {
+            built_rows += result.node.rows.row_contexts.len();
+            build_ms += result.build_ms;
+            *hunk_node = result.node;
+            applied_hunks += 1;
+            built_hunks += 1;
+            changed = true;
+        } else {
+            hunk_node.status = NodeStatus::Unbuilt;
+            hunk_node.rows = CachedRows::default();
+            changed = true;
+        }
+    }
+
+    for (file_index, file_node) in tree.files.iter().enumerate() {
+        for (hunk_index, hunk_node) in file_node.hunks.iter().enumerate() {
+            let should_be_ready = plan.contains(file_index, hunk_index);
+            match (hunk_node.status, should_be_ready) {
+                (NodeStatus::Unbuilt | NodeStatus::Dirty | NodeStatus::Loading, true) => {
+                    if hunk_node.status != NodeStatus::Ready {
+                        missing_hunks += 1;
+                    }
+                }
+                (NodeStatus::Ready, false) => extra_hunks += 1,
+                _ => {}
+            }
+        }
+    }
+
+    if missing_hunks > 0 {
+        for (file_index, file) in session.files.iter().enumerate() {
+            let Some(file_node) = tree.files.get_mut(file_index) else {
+                continue;
+            };
+
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                if queued_hunks >= limits.max_builds {
+                    break;
+                }
+                let should_be_ready = plan.contains(file_index, hunk_index);
+                let Some(hunk_node) = file_node.hunks.get_mut(hunk_index) else {
+                    continue;
+                };
+
+                if should_be_ready
+                    && matches!(hunk_node.status, NodeStatus::Unbuilt | NodeStatus::Dirty)
+                {
+                    worker.request_hunk(HunkBuildRequest {
+                        generation,
+                        file_index,
+                        hunk_index,
+                        path: file.path.clone(),
+                        hunk: hunk.clone(),
+                        inline_width: widths.inline,
+                        side_by_side_width: widths.side_by_side,
+                    });
+                    hunk_node.status = NodeStatus::Loading;
+                    queued_hunks += 1;
+                    missing_hunks = missing_hunks.saturating_sub(1);
+                }
+            }
+            if queued_hunks >= limits.max_builds {
+                break;
+            }
+        }
+    }
+
+    let remaining_missing = missing_hunks.saturating_sub(built_hunks);
+    if remaining_missing == 0 {
+        for file_node in &mut tree.files {
+            for hunk_node in &mut file_node.hunks {
+                let should_be_ready = plan.contains(hunk_node.file_index, hunk_node.hunk_index);
+                if hunk_node.status == NodeStatus::Ready
+                    && !should_be_ready
+                    && evicted_hunks < limits.max_evictions
+                {
+                    hunk_node.status = NodeStatus::Unbuilt;
+                    hunk_node.rows = CachedRows::default();
+                    evicted_hunks += 1;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    WindowResult {
+        changed,
+        built_hunks,
+        evicted_hunks,
+        built_rows,
+        build_ms,
+        missing_hunks: remaining_missing,
+        extra_hunks: extra_hunks.saturating_sub(evicted_hunks),
+        queued_hunks,
+        applied_hunks,
+    }
+}
+
+fn plan_resident_hunk_window(session: &DiffSession, target: HunkWindowTarget) -> ResidentHunkPlan {
+    let all_hunks: Vec<(usize, usize, usize)> = session
+        .files
+        .iter()
+        .enumerate()
+        .flat_map(|(file_index, file)| {
+            file.hunks
+                .iter()
+                .enumerate()
+                .map(move |(hunk_index, hunk)| (file_index, hunk_index, hunk.lines.len() + 2))
+        })
+        .collect();
+
+    if all_hunks.is_empty() {
+        return ResidentHunkPlan {
+            desired: HashSet::new(),
+        };
+    }
+
+    let selected_index = all_hunks
+        .iter()
+        .position(|&(file_index, hunk_index, _)| {
+            file_index == target.selected_file && hunk_index == target.selected_hunk
+        })
+        .unwrap_or(0);
+    let mut desired = HashSet::new();
+    let mut before_rows = 0usize;
+    let mut after_rows = 0usize;
+    let current = all_hunks[selected_index];
+    desired.insert((current.0, current.1));
+
+    let before_target = target.overscan_rows;
+    let after_target = target.viewport_rows.saturating_add(target.overscan_rows);
+    let mut previous_index = selected_index.checked_sub(1);
+    let mut next_index = selected_index + 1;
+
+    while before_rows < before_target || after_rows < after_target {
+        let mut progressed = false;
+        let prefer_up = matches!(target.nav_direction, Some(NavDirection::Up));
+        let prefer_down = matches!(target.nav_direction, Some(NavDirection::Down));
+
+        if prefer_up {
+            progressed |= try_extend_up(
+                &all_hunks,
+                &mut desired,
+                &mut before_rows,
+                before_target,
+                &mut previous_index,
+            );
+            progressed |= try_extend_down(
+                &all_hunks,
+                &mut desired,
+                &mut after_rows,
+                after_target,
+                &mut next_index,
+            );
+        } else if prefer_down {
+            progressed |= try_extend_down(
+                &all_hunks,
+                &mut desired,
+                &mut after_rows,
+                after_target,
+                &mut next_index,
+            );
+            progressed |= try_extend_up(
+                &all_hunks,
+                &mut desired,
+                &mut before_rows,
+                before_target,
+                &mut previous_index,
+            );
+        } else {
+            progressed |= try_extend_down(
+                &all_hunks,
+                &mut desired,
+                &mut after_rows,
+                after_target,
+                &mut next_index,
+            );
+            progressed |= try_extend_up(
+                &all_hunks,
+                &mut desired,
+                &mut before_rows,
+                before_target,
+                &mut previous_index,
+            );
+        }
+
+        if !progressed {
+            break;
+        }
+    }
+
+    ResidentHunkPlan { desired }
+}
+
+fn try_extend_down(
+    all_hunks: &[(usize, usize, usize)],
+    desired: &mut HashSet<(usize, usize)>,
+    covered_rows: &mut usize,
+    target_rows: usize,
+    next_index: &mut usize,
+) -> bool {
+    if *covered_rows >= target_rows || *next_index >= all_hunks.len() {
+        return false;
+    }
+
+    let next = all_hunks[*next_index];
+    desired.insert((next.0, next.1));
+    *covered_rows += next.2;
+    *next_index += 1;
+    true
+}
+
+fn try_extend_up(
+    all_hunks: &[(usize, usize, usize)],
+    desired: &mut HashSet<(usize, usize)>,
+    covered_rows: &mut usize,
+    target_rows: usize,
+    previous_index: &mut Option<usize>,
+) -> bool {
+    if *covered_rows >= target_rows {
+        return false;
+    }
+    let Some(index) = *previous_index else {
+        return false;
+    };
+
+    let previous = all_hunks[index];
+    desired.insert((previous.0, previous.1));
+    *covered_rows += previous.2;
+    *previous_index = index.checked_sub(1);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+
+    #[test]
+    fn planner_expands_after_the_selected_hunk_to_cover_the_viewport() {
+        let session = session_with_hunks(4);
+        let plan = plan_resident_hunk_window(
+            &session,
+            HunkWindowTarget {
+                selected_hunk: 1,
+                viewport_rows: 1,
+                ..default_target()
+            },
+        );
+
+        assert_eq!(desired_hunks(&plan), vec![(0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn planner_uses_overscan_on_both_sides() {
+        let session = session_with_hunks(4);
+        let plan = plan_resident_hunk_window(
+            &session,
+            HunkWindowTarget {
+                selected_hunk: 1,
+                viewport_rows: 0,
+                overscan_rows: 3,
+                ..default_target()
+            },
+        );
+
+        assert_eq!(desired_hunks(&plan), vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    fn desired_hunks(plan: &ResidentHunkPlan) -> Vec<(usize, usize)> {
+        let mut desired: Vec<_> = plan.desired.iter().copied().collect();
+        desired.sort_unstable();
+        desired
+    }
+
+    fn default_target() -> HunkWindowTarget {
+        HunkWindowTarget {
+            selected_file: 0,
+            selected_hunk: 0,
+            viewport_rows: 0,
+            overscan_rows: 0,
+            nav_direction: None,
+        }
+    }
+
+    fn session_with_hunks(count: usize) -> DiffSession {
+        DiffSession {
+            files: vec![DiffFile {
+                path: "test.rs".to_string(),
+                old_path: "test.rs".to_string(),
+                new_path: "test.rs".to_string(),
+                hunks: (0..count)
+                    .map(|index| DiffHunk {
+                        header: format!("@@ hunk {index} @@"),
+                        lines: vec![DiffLine::Context {
+                            old_lineno: index + 1,
+                            new_lineno: index + 1,
+                            text: format!("line {index}"),
+                        }],
+                    })
+                    .collect(),
+            }],
+        }
+    }
+}
