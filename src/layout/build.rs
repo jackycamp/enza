@@ -28,6 +28,7 @@ struct NoteOverlay {
 }
 
 impl Layout {
+    // FIXME: Has way to many arguments
     pub fn build(
         session: &DiffSession,
         notes: &[Note],
@@ -76,6 +77,7 @@ impl Layout {
         layout
     }
 
+    // FIXME: Again, way too many arguments
     pub fn ensure_hunk_window(
         &mut self,
         worker: &LayoutWorker,
@@ -225,6 +227,7 @@ fn reset_loading_hunks(tree: &mut LayoutTree) {
     }
 }
 
+// FIXME: Why so many arguments
 fn build_base_layout(
     session: &DiffSession,
     inline_width: usize,
@@ -443,6 +446,7 @@ struct WindowResult {
     applied_hunks: usize,
 }
 
+// FIXME: too many arguments
 fn apply_resident_hunk_window_sync(
     tree: &mut LayoutTree,
     session: &DiffSession,
@@ -510,6 +514,7 @@ fn apply_resident_hunk_window_sync(
     }
 }
 
+// FIXME: Too many arguments
 fn apply_resident_hunk_window(
     tree: &mut LayoutTree,
     worker: &LayoutWorker,
@@ -741,6 +746,7 @@ fn resident_hunk_window(
                 &mut next_index,
             );
         } else if prefer_down {
+            // FIXME: this if has identical blocks
             progressed |= try_extend_down(
                 &all_hunks,
                 &mut desired,

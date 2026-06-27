@@ -2,6 +2,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+use crate::layout::plan::plan_row_contexts;
 use crate::layout::{Layout, LayoutWorker};
 
 use super::model::NodeStatus;
@@ -37,7 +38,7 @@ fn moving_the_window_evicts_hunks_outside_it() {
     let worker = LayoutWorker::new();
     let mut layout = Layout::build(&session, &[], &[], 80, 80, 0, 0, 1, 0, None);
     assert_eq!(layout.base.tree.files[0].hunks[0].status, NodeStatus::Ready);
-    let original_contexts = layout.base_row_contexts(&session);
+    let original_contexts = plan_row_contexts(&session, &layout.base.plan);
     let original_hunk_starts = hunk_starts(&layout);
 
     wait_until(Duration::from_secs(1), || {
@@ -57,7 +58,10 @@ fn moving_the_window_evicts_hunks_outside_it() {
             .row_contexts
             .is_empty()
     );
-    assert_eq!(layout.base_row_contexts(&session), original_contexts);
+    assert_eq!(
+        plan_row_contexts(&session, &layout.base.plan),
+        original_contexts
+    );
     assert_eq!(hunk_starts(&layout), original_hunk_starts);
 }
 

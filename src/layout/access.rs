@@ -1,8 +1,6 @@
 use crate::diff::DiffSession;
 use crate::layout::model::{Layout, LayoutRowLocation, NoteInsertion, RowContext, RowKind};
-use crate::layout::plan::{
-    plan_row_contexts, plan_row_index_for_context, row_context_for_plan_row,
-};
+use crate::layout::plan::{plan_row_index_for_context, row_context_for_plan_row};
 
 impl Layout {
     pub fn line_count_for_mode(&self, _side_by_side: bool) -> usize {
@@ -24,10 +22,6 @@ impl Layout {
         (0..self.row_count)
             .filter_map(|row| self.row_context(session, row))
             .collect()
-    }
-
-    pub fn base_row_contexts(&self, session: &DiffSession) -> Vec<RowContext> {
-        plan_row_contexts(session, &self.base.plan)
     }
 
     pub fn row_index_for_context(
