@@ -11,7 +11,6 @@ use super::model::NodeStatus;
 fn viewport_growth_after_a_resize_can_load_more_hunks() {
     let session = session_with_hunks(4);
     let worker = LayoutWorker::new();
-    worker.set_generation(7);
     let mut layout = Layout::build(&session, &[], &[], 80, 80, 0, 0, 1, 0, None);
 
     layout.ensure_hunk_window(&worker, &session, &[], &[], 0, 0, 100, 0, None);
