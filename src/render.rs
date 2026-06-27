@@ -27,7 +27,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
     let previous_cursor = app.main_pane.cursor_target.or_else(|| {
         app.layout
             .as_ref()
-            .and_then(|layout| layout.row_contexts.get(app.main_pane.cursor_row).copied())
+            .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row))
     });
 
     if needs_rebuild {
@@ -60,7 +60,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
     if let Some(context) = previous_cursor
         && let Some(layout) = &app.layout
     {
-        if let Some(index) = row_index_for_context(layout, context) {
+        if let Some(index) = row_index_for_context(layout, &app.session, context) {
             app.main_pane.cursor_row = index;
             app.main_pane.cursor_target = Some(context);
             app.main_pane.scroll = index.saturating_sub(previous_visual_offset) as u16;
@@ -69,7 +69,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
                 && range.hunk_index == app.main_pane.selected_hunk
         }) {
             app.main_pane.cursor_row = range.start;
-            app.main_pane.cursor_target = layout.row_contexts.get(range.start).copied();
+            app.main_pane.cursor_target = layout.row_context(&app.session, range.start);
             app.main_pane.selection_anchor = None;
             app.main_pane.scroll = range.start.saturating_sub(previous_visual_offset) as u16;
         } else {
@@ -123,12 +123,17 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     app.main_pane.cursor_row = range.start;
     app.main_pane.scroll = if app.main_pane.selected_hunk == 0 {
         layout
-            .row_contexts
-            .iter()
-            .position(|context| {
-                context.file_index == Some(app.main_pane.selected_file)
-                    && context.kind == crate::layout::RowKind::FileHeader
-            })
+            .row_index_for_context(
+                &app.session,
+                crate::layout::RowContext {
+                    file_index: Some(app.main_pane.selected_file),
+                    hunk_index: None,
+                    kind: crate::layout::RowKind::FileHeader,
+                    old_lineno: None,
+                    new_lineno: None,
+                    note_id: None,
+                },
+            )
             .unwrap_or(range.start) as u16
     } else {
         range.start as u16
@@ -262,8 +267,10 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
 
     let lines = layout.materialize_rows(
+        &app.session,
         true,
         &row_view_state(app, app.global.focus == FocusPane::Main),
+        viewport_line_capacity(app, area),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
@@ -286,8 +293,10 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
 
     let lines = layout.materialize_rows(
+        &app.session,
         false,
         &row_view_state(app, app.global.focus == FocusPane::Main),
+        viewport_line_capacity(app, area),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
@@ -497,7 +506,10 @@ fn debug_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             .count();
         lines.push(Line::from(format!("Ready Hunks {}", ready_hunks)));
         lines.push(Line::from(format!("Pending Hunks {}", pending_hunks)));
-        lines.push(Line::from(format!("Base Rows {}", layout.base.row_contexts.len())));
+        lines.push(Line::from(format!(
+            "Base Rows {}",
+            layout.base.plan.row_count
+        )));
         let direction = match app.global.nav_direction {
             Some(crate::state::NavDirection::Up) => "up",
             Some(crate::state::NavDirection::Down) => "down",
@@ -559,15 +571,13 @@ fn format_debug_event(event: &log::Event, width: usize) -> String {
 }
 
 fn latest_field<'a>(events: &'a [log::Event], key: &str) -> Option<&'a str> {
-    events
-        .iter()
-        .find_map(|event| {
-            event
-                .fields
-                .iter()
-                .find(|(field_key, _)| field_key == key)
-                .map(|(_, value)| value.as_str())
-        })
+    events.iter().find_map(|event| {
+        event
+            .fields
+            .iter()
+            .find(|(field_key, _)| field_key == key)
+            .map(|(_, value)| value.as_str())
+    })
 }
 
 fn debug_fragments(event: &log::Event) -> Vec<String> {
@@ -628,13 +638,10 @@ fn row_view_state(app: &App, cursor_focused: bool) -> RowViewState {
     }
 }
 
-fn row_index_for_context(layout: &DiffLayout, target: crate::layout::RowContext) -> Option<usize> {
-    layout.row_contexts.iter().position(|context| {
-        context.file_index == target.file_index
-            && context.hunk_index == target.hunk_index
-            && context.kind == target.kind
-            && context.old_lineno == target.old_lineno
-            && context.new_lineno == target.new_lineno
-            && context.note_id == target.note_id
-    })
+fn row_index_for_context(
+    layout: &DiffLayout,
+    session: &crate::diff::DiffSession,
+    target: crate::layout::RowContext,
+) -> Option<usize> {
+    layout.row_index_for_context(session, target)
 }

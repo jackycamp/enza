@@ -3,69 +3,107 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::diff::{DiffFile, DiffLine};
+use crate::diff::{DiffFile, DiffLine, DiffSession};
 use crate::highlight::{DiffKind, FileHighlighter};
-use crate::layout::model::{Layout, RenderRow, RowViewState};
+use crate::layout::model::{Layout, LayoutRowLocation, RenderRow, RowViewState};
+use crate::layout::plan::plan_row_to_render_rows;
 use crate::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
 
 impl Layout {
     pub fn materialize_rows(
         &self,
+        session: &DiffSession,
         side_by_side: bool,
         view: &RowViewState,
+        max_rows: usize,
     ) -> Vec<Line<'static>> {
-        let rows = if side_by_side {
-            &self.side_by_side_rows
-        } else {
-            &self.inline_rows
+        let start = view.scroll as usize;
+        let end = self.row_count.min(start.saturating_add(max_rows));
+
+        (start..end)
+            .map(|absolute_row| {
+                let line = self.render_line_for_row(session, side_by_side, view, absolute_row);
+                let in_selection = view
+                    .selected_rows
+                    .is_some_and(|(start, end)| absolute_row >= start && absolute_row <= end);
+
+                if absolute_row == view.cursor_row {
+                    highlight_cursor_line(line, view.cursor_focused, in_selection)
+                } else if in_selection {
+                    highlight_selected_line(line)
+                } else {
+                    line
+                }
+            })
+            .collect()
+    }
+
+    fn render_line_for_row(
+        &self,
+        session: &DiffSession,
+        side_by_side: bool,
+        view: &RowViewState,
+        row_index: usize,
+    ) -> Line<'static> {
+        let row = match self.locate_row(row_index) {
+            Some(LayoutRowLocation::Note {
+                insertion_index,
+                row_offset,
+            }) => {
+                let Some(insertion) = self.note_insertions.get(insertion_index) else {
+                    return Line::default();
+                };
+                let rows = if side_by_side {
+                    &insertion.side_by_side_rows
+                } else {
+                    &insertion.inline_rows
+                };
+                rows.get(row_offset).cloned()
+            }
+            Some(LayoutRowLocation::Base { base_index }) => {
+                let (inline, side_by_side_row) = plan_row_to_render_rows(
+                    session,
+                    &self.base.tree,
+                    &self.base.plan,
+                    base_index,
+                    self.side_by_side_width,
+                );
+                Some(if side_by_side {
+                    side_by_side_row
+                } else {
+                    inline
+                })
+            }
+            None => None,
         };
 
-        rows.iter()
-        .skip(view.scroll as usize)
-        .zip(self.row_contexts.iter().skip(view.scroll as usize))
-        .enumerate()
-        .map(|(visible_index, (row, _context))| {
-            let line = match row {
-                RenderRow::Static(line) => line.clone(),
-                RenderRow::FileHeader {
-                    file_index,
-                    normal,
-                    selected,
-                } => {
-                    if *file_index == view.selected_file {
-                        selected.clone()
-                    } else {
-                        normal.clone()
-                    }
+        match row.unwrap_or_else(|| RenderRow::Static(Line::default())) {
+            RenderRow::Static(line) => line,
+            RenderRow::FileHeader {
+                file_index,
+                normal,
+                selected,
+            } => {
+                if file_index == view.selected_file {
+                    selected
+                } else {
+                    normal
                 }
-                RenderRow::HunkHeader {
-                    file_index,
-                    hunk_index,
-                    normal,
-                    selected,
-                } => {
-                    if *file_index == view.selected_file && *hunk_index == view.selected_hunk {
-                        selected.clone()
-                    } else {
-                        normal.clone()
-                    }
-                }
-                RenderRow::Note(line) => line.clone(),
-            };
-
-            let absolute_row = view.scroll as usize + visible_index;
-            let in_selection = view.selected_rows
-                .is_some_and(|(start, end)| absolute_row >= start && absolute_row <= end);
-
-            if absolute_row == view.cursor_row {
-                highlight_cursor_line(line, view.cursor_focused, in_selection)
-            } else if in_selection {
-                highlight_selected_line(line)
-            } else {
-                line
             }
-        })
-        .collect()
+            RenderRow::HunkHeader {
+                file_index,
+                hunk_index,
+                normal,
+                selected,
+            } => {
+                if file_index == view.selected_file && hunk_index == view.selected_hunk {
+                    selected
+                } else {
+                    normal
+                }
+            }
+            RenderRow::Note(line) => line,
+        }
     }
 }
 

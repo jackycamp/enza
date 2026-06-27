@@ -96,7 +96,7 @@ fn run_app(
             let num_rows = app
                 .layout
                 .as_ref()
-                .map(|layout| layout.row_contexts.len())
+                .map(|layout| layout.row_count)
                 .unwrap_or(0)
                 .to_string();
             let mut fields = vec![("elapsed_ms", elapsed_ms), ("rows", num_rows)];

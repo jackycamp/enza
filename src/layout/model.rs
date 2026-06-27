@@ -55,15 +55,26 @@ pub enum RowId {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PlannedRow {
-    pub id: RowId,
-    pub context: RowContext,
+pub struct PlannedHunk {
+    pub file_index: usize,
+    pub hunk_index: usize,
+    pub start: usize,
+    pub line_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedFile {
+    pub file_index: usize,
+    pub start: usize,
+    pub trailing_spacer: usize,
+    pub hunks: Vec<PlannedHunk>,
 }
 
 #[derive(Clone, Debug)]
 pub struct LayoutPlan {
-    pub rows: Vec<PlannedRow>,
+    pub files: Vec<PlannedFile>,
     pub hunk_ranges: Vec<HunkRange>,
+    pub row_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -74,10 +85,9 @@ pub struct Layout {
     pub target_file: usize,
     pub target_hunk: usize,
     pub base: BaseLayout,
-    pub inline_rows: Vec<RenderRow>,
-    pub side_by_side_rows: Vec<RenderRow>,
     pub hunk_ranges: Vec<HunkRange>,
-    pub row_contexts: Vec<RowContext>,
+    pub note_insertions: Vec<NoteInsertion>,
+    pub row_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -85,10 +95,7 @@ pub struct BaseLayout {
     #[allow(dead_code)]
     pub tree: LayoutTree,
     pub plan: LayoutPlan,
-    pub inline_rows: Vec<RenderRow>,
-    pub side_by_side_rows: Vec<RenderRow>,
     pub hunk_ranges: Vec<HunkRange>,
-    pub row_contexts: Vec<RowContext>,
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +127,31 @@ pub struct CachedRows {
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub row_contexts: Vec<RowContext>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NoteInsertion {
+    pub base_index: usize,
+    pub inline_rows: Vec<RenderRow>,
+    pub side_by_side_rows: Vec<RenderRow>,
+    pub context: RowContext,
+}
+
+impl NoteInsertion {
+    pub fn len(&self) -> usize {
+        self.inline_rows.len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutRowLocation {
+    Base {
+        base_index: usize,
+    },
+    Note {
+        insertion_index: usize,
+        row_offset: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

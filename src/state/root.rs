@@ -247,7 +247,7 @@ impl App {
                 hunk_index,
                 ..
             },
-        ) = layout.row_contexts.get(self.main_pane.cursor_row).copied()
+        ) = layout.row_context(&self.session, self.main_pane.cursor_row)
         else {
             return;
         };
@@ -278,8 +278,7 @@ impl App {
             return;
         };
         let Some(note_id) = layout
-            .row_contexts
-            .get(self.main_pane.cursor_row)
+            .row_context(&self.session, self.main_pane.cursor_row)
             .and_then(|context| context.note_id)
         else {
             return;
@@ -347,13 +346,14 @@ impl App {
         let Some(layout) = &self.layout else {
             return None;
         };
+        let row_contexts = layout.row_contexts(&self.session);
 
         if let Some((start, end)) = self.selected_row_range()
             && start != end
         {
             return note_target_for_range(
                 &self.session.files,
-                &layout.row_contexts,
+                &row_contexts,
                 start,
                 end,
                 self.main_pane.cursor_row,
@@ -362,7 +362,7 @@ impl App {
 
         note_target_for_row(
             &self.session.files,
-            &layout.row_contexts,
+            &row_contexts,
             self.main_pane.cursor_row,
         )
     }
@@ -370,8 +370,7 @@ impl App {
     pub fn current_note_id(&self) -> Option<u64> {
         self.layout
             .as_ref()?
-            .row_contexts
-            .get(self.main_pane.cursor_row)?
+            .row_context(&self.session, self.main_pane.cursor_row)?
             .note_id
     }
 
@@ -407,20 +406,18 @@ impl App {
         let Some(layout) = &self.layout else {
             return;
         };
-        self.main_pane.cursor_target = layout.row_contexts.get(self.main_pane.cursor_row).copied();
+        self.main_pane.cursor_target = layout.row_context(&self.session, self.main_pane.cursor_row);
     }
 
     fn try_advance_to_next_hunk(&mut self) -> bool {
         let Some(layout) = &self.layout else {
             return false;
         };
-        let Some(current) = layout.row_contexts.get(self.main_pane.cursor_row).copied() else {
+        let Some(current) = layout.row_context(&self.session, self.main_pane.cursor_row) else {
             return false;
         };
-        let Some(next) = layout
-            .row_contexts
-            .get(self.main_pane.cursor_row.saturating_add(1))
-            .copied()
+        let Some(next) =
+            layout.row_context(&self.session, self.main_pane.cursor_row.saturating_add(1))
         else {
             return false;
         };
@@ -448,7 +445,7 @@ impl App {
             note_id: None,
         };
         self.main_pane.cursor_target = Some(target);
-        if let Some(index) = row_index_for_context(layout, target) {
+        if let Some(index) = row_index_for_context(layout, &self.session, target) {
             self.main_pane.cursor_row = index;
         }
         true
@@ -458,16 +455,13 @@ impl App {
         let Some(layout) = &self.layout else {
             return false;
         };
-        let Some(current) = layout.row_contexts.get(self.main_pane.cursor_row).copied() else {
+        let Some(current) = layout.row_context(&self.session, self.main_pane.cursor_row) else {
             return false;
         };
         if self.main_pane.cursor_row == 0 {
             return false;
         }
-        let Some(previous) = layout
-            .row_contexts
-            .get(self.main_pane.cursor_row - 1)
-            .copied()
+        let Some(previous) = layout.row_context(&self.session, self.main_pane.cursor_row - 1)
         else {
             return false;
         };
@@ -493,7 +487,7 @@ impl App {
         self.main_pane.selected_file = file_index;
         self.main_pane.selected_hunk = hunk_index;
         self.main_pane.cursor_target = Some(target);
-        if let Some(index) = row_index_for_context(layout, target) {
+        if let Some(index) = row_index_for_context(layout, &self.session, target) {
             self.main_pane.cursor_row = index;
         }
         true
@@ -568,15 +562,12 @@ fn last_meaningful_row_context(
     })
 }
 
-fn row_index_for_context(layout: &Layout, target: RowContext) -> Option<usize> {
-    layout.row_contexts.iter().position(|context| {
-        context.file_index == target.file_index
-            && context.hunk_index == target.hunk_index
-            && context.kind == target.kind
-            && context.old_lineno == target.old_lineno
-            && context.new_lineno == target.new_lineno
-            && context.note_id == target.note_id
-    })
+fn row_index_for_context(
+    layout: &Layout,
+    session: &DiffSession,
+    target: RowContext,
+) -> Option<usize> {
+    layout.row_index_for_context(session, target)
 }
 
 #[cfg(test)]
@@ -605,10 +596,10 @@ mod tests {
         })
     }
 
-    fn row_for(layout: &Layout, hunk_index: usize, kind: RowKind) -> usize {
+    fn row_for(session: &DiffSession, layout: &Layout, hunk_index: usize, kind: RowKind) -> usize {
         layout
-            .row_contexts
-            .iter()
+            .row_contexts(session)
+            .into_iter()
             .position(|context| context.hunk_index == Some(hunk_index) && context.kind == kind)
             .unwrap()
     }
@@ -619,12 +610,12 @@ mod tests {
         let mut layout = Layout::build(&app.session, &[], &[], 80, 80, 0, 0, 1, 0, None);
 
         layout.target_hunk = 1;
-        let boundary = row_for(&layout, 1, RowKind::Spacer);
+        let boundary = row_for(&app.session, &layout, 1, RowKind::Spacer);
         app.layout = Some(layout);
         app.main_pane.selected_hunk = 1;
         app.main_pane.cursor_row = boundary;
 
-        let max_row = app.layout.as_ref().unwrap().row_contexts.len() - 1;
+        let max_row = app.layout.as_ref().unwrap().row_count - 1;
         app.move_cursor_down(1, max_row);
         assert_eq!(app.main_pane.selected_hunk, 2);
 
@@ -639,7 +630,7 @@ mod tests {
             0,
             app.global.nav_direction,
         );
-        let new_max_row = app.layout.as_ref().unwrap().row_contexts.len() - 1;
+        let new_max_row = app.layout.as_ref().unwrap().row_count - 1;
         app.clamp_cursor_row(new_max_row);
         app.sync_selection_to_cursor();
 
@@ -672,7 +663,8 @@ mod tests {
             note_id: None,
         };
         let original_index =
-            row_index_for_context(app.layout.as_ref().unwrap(), selected_context).unwrap();
+            row_index_for_context(app.layout.as_ref().unwrap(), &app.session, selected_context)
+                .unwrap();
         app.main_pane.cursor_row = original_index;
         app.main_pane.cursor_target = Some(selected_context);
         app.main_pane.selection_anchor = Some(original_index);
@@ -682,11 +674,17 @@ mod tests {
             .unwrap()
             .ensure_selected_hunk_ready_sync(&app.session, &[], &[], 0, 0);
         let remapped_cursor =
-            row_index_for_context(app.layout.as_ref().unwrap(), selected_context).unwrap();
+            row_index_for_context(app.layout.as_ref().unwrap(), &app.session, selected_context)
+                .unwrap();
         app.main_pane.cursor_row = remapped_cursor;
 
         let anchor = app.main_pane.selection_anchor.unwrap();
-        let anchor_context = app.layout.as_ref().unwrap().row_contexts[anchor];
+        let anchor_context = app
+            .layout
+            .as_ref()
+            .unwrap()
+            .row_context(&app.session, anchor)
+            .unwrap();
         assert_eq!(anchor_context.file_index, selected_context.file_index);
         assert_eq!(anchor_context.hunk_index, selected_context.hunk_index);
         assert_eq!(anchor_context.kind, selected_context.kind);

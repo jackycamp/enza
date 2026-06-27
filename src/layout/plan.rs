@@ -3,145 +3,141 @@ use ratatui::text::Line;
 use crate::diff::DiffSession;
 use crate::layout::lines::{hunk_header_line, hunk_header_row, side_by_side_hunk_header_line};
 use crate::layout::model::{
-    CachedRows, HunkRange, LayoutPlan, LayoutTree, NodeStatus, PlannedRow, RenderRow, RowContext,
-    RowId, RowKind,
+    CachedRows, HunkRange, LayoutPlan, LayoutTree, NodeStatus, PlannedFile, PlannedHunk, RenderRow,
+    RowContext, RowId, RowKind,
 };
 
-pub(super) struct LayoutRenderRows {
-    pub inline_rows: Vec<RenderRow>,
-    pub side_by_side_rows: Vec<RenderRow>,
-    pub row_contexts: Vec<RowContext>,
-}
-
 pub(super) fn build_layout_plan(session: &DiffSession) -> LayoutPlan {
-    let mut rows = Vec::new();
+    let mut files = Vec::new();
     let mut hunk_ranges = Vec::new();
+    let mut row_count = 0usize;
 
     for (file_index, file) in session.files.iter().enumerate() {
-        rows.push(PlannedRow {
-            id: RowId::FileSeparator { file_index },
-            context: RowContext {
-                file_index: Some(file_index),
-                hunk_index: None,
-                kind: RowKind::Separator,
-                old_lineno: None,
-                new_lineno: None,
-                note_id: None,
-            },
-        });
-        rows.push(PlannedRow {
-            id: RowId::FileHeader { file_index },
-            context: RowContext {
-                file_index: Some(file_index),
-                hunk_index: None,
-                kind: RowKind::FileHeader,
-                old_lineno: None,
-                new_lineno: None,
-                note_id: None,
-            },
-        });
+        let file_start = row_count;
+        row_count += 2;
 
+        let mut hunks = Vec::with_capacity(file.hunks.len());
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+            let start = row_count;
             hunk_ranges.push(HunkRange {
                 file_index,
                 hunk_index,
-                start: rows.len(),
+                start,
             });
-            rows.push(PlannedRow {
-                id: RowId::HunkHeader {
-                    file_index,
-                    hunk_index,
-                },
-                context: RowContext {
-                    file_index: Some(file_index),
-                    hunk_index: Some(hunk_index),
-                    kind: RowKind::HunkHeader,
-                    old_lineno: None,
-                    new_lineno: None,
-                    note_id: None,
-                },
+            hunks.push(PlannedHunk {
+                file_index,
+                hunk_index,
+                start,
+                line_count: hunk.lines.len(),
             });
-            rows.extend(
-                hunk.lines
-                    .iter()
-                    .enumerate()
-                    .map(|(line_index, line)| PlannedRow {
-                        id: RowId::DiffLine {
-                            file_index,
-                            hunk_index,
-                            line_index,
-                        },
-                        context: RowContext {
-                            file_index: Some(file_index),
-                            hunk_index: Some(hunk_index),
-                            kind: RowKind::DiffLine,
-                            old_lineno: line.old_lineno(),
-                            new_lineno: line.new_lineno(),
-                            note_id: None,
-                        },
-                    }),
-            );
-            rows.push(PlannedRow {
-                id: RowId::HunkSpacer {
-                    file_index,
-                    hunk_index,
-                },
-                context: RowContext {
-                    file_index: Some(file_index),
-                    hunk_index: Some(hunk_index),
-                    kind: RowKind::Spacer,
-                    old_lineno: None,
-                    new_lineno: None,
-                    note_id: None,
-                },
-            });
+            row_count += hunk.lines.len() + 2;
         }
 
-        rows.push(PlannedRow {
-            id: RowId::FileSpacer { file_index },
-            context: RowContext {
-                file_index: Some(file_index),
-                hunk_index: None,
-                kind: RowKind::Spacer,
-                old_lineno: None,
-                new_lineno: None,
-                note_id: None,
-            },
+        let trailing_spacer = row_count;
+        row_count += 1;
+
+        files.push(PlannedFile {
+            file_index,
+            start: file_start,
+            trailing_spacer,
+            hunks,
         });
     }
 
-    LayoutPlan { rows, hunk_ranges }
+    LayoutPlan {
+        files,
+        hunk_ranges,
+        row_count,
+    }
 }
 
-pub(super) fn layout_plan_to_render_rows(
+pub(super) fn row_context_for_plan_row(
+    session: &DiffSession,
+    plan: &LayoutPlan,
+    row_index: usize,
+) -> Option<RowContext> {
+    match row_id_for_plan_row(plan, row_index)? {
+        RowId::FileSeparator { file_index } => Some(RowContext {
+            file_index: Some(file_index),
+            hunk_index: None,
+            kind: RowKind::Separator,
+            old_lineno: None,
+            new_lineno: None,
+            note_id: None,
+        }),
+        RowId::FileHeader { file_index } => Some(RowContext {
+            file_index: Some(file_index),
+            hunk_index: None,
+            kind: RowKind::FileHeader,
+            old_lineno: None,
+            new_lineno: None,
+            note_id: None,
+        }),
+        RowId::HunkHeader {
+            file_index,
+            hunk_index,
+        } => Some(RowContext {
+            file_index: Some(file_index),
+            hunk_index: Some(hunk_index),
+            kind: RowKind::HunkHeader,
+            old_lineno: None,
+            new_lineno: None,
+            note_id: None,
+        }),
+        RowId::DiffLine {
+            file_index,
+            hunk_index,
+            line_index,
+        } => {
+            let line = session
+                .files
+                .get(file_index)?
+                .hunks
+                .get(hunk_index)?
+                .lines
+                .get(line_index)?;
+            Some(RowContext {
+                file_index: Some(file_index),
+                hunk_index: Some(hunk_index),
+                kind: RowKind::DiffLine,
+                old_lineno: line.old_lineno(),
+                new_lineno: line.new_lineno(),
+                note_id: None,
+            })
+        }
+        RowId::HunkSpacer {
+            file_index,
+            hunk_index,
+        } => Some(RowContext {
+            file_index: Some(file_index),
+            hunk_index: Some(hunk_index),
+            kind: RowKind::Spacer,
+            old_lineno: None,
+            new_lineno: None,
+            note_id: None,
+        }),
+        RowId::FileSpacer { file_index } => Some(RowContext {
+            file_index: Some(file_index),
+            hunk_index: None,
+            kind: RowKind::Spacer,
+            old_lineno: None,
+            new_lineno: None,
+            note_id: None,
+        }),
+    }
+}
+
+pub(super) fn plan_row_to_render_rows(
     session: &DiffSession,
     tree: &LayoutTree,
     plan: &LayoutPlan,
-    side_by_side_width: usize,
-) -> LayoutRenderRows {
-    let mut inline_rows = Vec::with_capacity(plan.rows.len());
-    let mut side_by_side_rows = Vec::with_capacity(plan.rows.len());
-
-    for planned in &plan.rows {
-        let (inline, side_by_side) =
-            materialize_planned_row(session, tree, planned.id, side_by_side_width);
-        inline_rows.push(inline);
-        side_by_side_rows.push(side_by_side);
-    }
-
-    LayoutRenderRows {
-        inline_rows,
-        side_by_side_rows,
-        row_contexts: plan.rows.iter().map(|row| row.context).collect(),
-    }
-}
-
-fn materialize_planned_row(
-    session: &DiffSession,
-    tree: &LayoutTree,
-    row_id: RowId,
+    row_index: usize,
     side_by_side_width: usize,
 ) -> (RenderRow, RenderRow) {
+    let Some(row_id) = row_id_for_plan_row(plan, row_index) else {
+        return blank_row_pair();
+    };
+
     match row_id {
         RowId::FileSeparator { file_index } => tree
             .files
@@ -221,6 +217,118 @@ fn materialize_planned_row(
             .and_then(|file| cached_row_pair(&file.trailing_spacer, 0))
             .unwrap_or_else(blank_row_pair),
     }
+}
+
+pub(super) fn plan_row_contexts(session: &DiffSession, plan: &LayoutPlan) -> Vec<RowContext> {
+    (0..plan.row_count)
+        .filter_map(|row| row_context_for_plan_row(session, plan, row))
+        .collect()
+}
+
+pub(super) fn plan_row_index_for_context(
+    session: &DiffSession,
+    plan: &LayoutPlan,
+    target: RowContext,
+) -> Option<usize> {
+    if target.note_id.is_some() {
+        return None;
+    }
+
+    let file_index = target.file_index?;
+    let file = file_for_index(plan, file_index)?;
+
+    match target.kind {
+        RowKind::Separator => Some(file.start),
+        RowKind::FileHeader => Some(file.start + 1),
+        RowKind::HunkHeader => {
+            let hunk = hunk_for_index(file, target.hunk_index?)?;
+            Some(hunk.start)
+        }
+        RowKind::DiffLine => {
+            let hunk_index = target.hunk_index?;
+            let hunk = hunk_for_index(file, hunk_index)?;
+            let line_index = session
+                .files
+                .get(file_index)?
+                .hunks
+                .get(hunk_index)?
+                .lines
+                .iter()
+                .position(|line| {
+                    line.old_lineno() == target.old_lineno && line.new_lineno() == target.new_lineno
+                })?;
+            Some(hunk.start + 1 + line_index)
+        }
+        RowKind::Spacer => {
+            if let Some(hunk_index) = target.hunk_index {
+                let hunk = hunk_for_index(file, hunk_index)?;
+                Some(hunk.start + hunk.line_count + 1)
+            } else {
+                Some(file.trailing_spacer)
+            }
+        }
+        RowKind::Note => None,
+    }
+}
+
+fn row_id_for_plan_row(plan: &LayoutPlan, row_index: usize) -> Option<RowId> {
+    let file = file_for_row(plan, row_index)?;
+    if row_index == file.start {
+        return Some(RowId::FileSeparator {
+            file_index: file.file_index,
+        });
+    }
+    if row_index == file.start + 1 {
+        return Some(RowId::FileHeader {
+            file_index: file.file_index,
+        });
+    }
+    if row_index == file.trailing_spacer {
+        return Some(RowId::FileSpacer {
+            file_index: file.file_index,
+        });
+    }
+
+    let hunk = hunk_for_row(file, row_index)?;
+    let offset = row_index.saturating_sub(hunk.start);
+    if offset == 0 {
+        return Some(RowId::HunkHeader {
+            file_index: hunk.file_index,
+            hunk_index: hunk.hunk_index,
+        });
+    }
+    if offset == hunk.line_count + 1 {
+        return Some(RowId::HunkSpacer {
+            file_index: hunk.file_index,
+            hunk_index: hunk.hunk_index,
+        });
+    }
+
+    Some(RowId::DiffLine {
+        file_index: hunk.file_index,
+        hunk_index: hunk.hunk_index,
+        line_index: offset - 1,
+    })
+}
+
+fn file_for_row(plan: &LayoutPlan, row_index: usize) -> Option<&PlannedFile> {
+    let index = plan.files.partition_point(|file| file.start <= row_index);
+    let file = plan.files.get(index.checked_sub(1)?)?;
+    (row_index <= file.trailing_spacer).then_some(file)
+}
+
+fn file_for_index(plan: &LayoutPlan, file_index: usize) -> Option<&PlannedFile> {
+    plan.files.get(file_index)
+}
+
+fn hunk_for_row(file: &PlannedFile, row_index: usize) -> Option<&PlannedHunk> {
+    let index = file.hunks.partition_point(|hunk| hunk.start <= row_index);
+    let hunk = file.hunks.get(index.checked_sub(1)?)?;
+    (row_index <= hunk.start + hunk.line_count + 1).then_some(hunk)
+}
+
+fn hunk_for_index(file: &PlannedFile, hunk_index: usize) -> Option<&PlannedHunk> {
+    file.hunks.get(hunk_index)
 }
 
 fn cached_row_pair(rows: &CachedRows, index: usize) -> Option<(RenderRow, RenderRow)> {

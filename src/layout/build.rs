@@ -10,22 +10,21 @@ use crate::layout::lines::{
 };
 use crate::layout::model::{
     BaseLayout, CachedRows, FileNode, HunkNode, HunkRange, Layout, LayoutTree, NodeStatus,
-    RenderRow, RowContext, RowKind,
+    NoteInsertion, RenderRow, RowContext, RowKind,
 };
 use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
 };
-use crate::layout::plan::{build_layout_plan, layout_plan_to_render_rows};
+use crate::layout::plan::{build_layout_plan, plan_row_contexts};
 use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
 use crate::log;
 use crate::note::Note;
 use crate::state::NavDirection;
 
 struct NoteOverlay {
-    inline_rows: Vec<RenderRow>,
-    side_by_side_rows: Vec<RenderRow>,
-    row_contexts: Vec<RowContext>,
+    insertions: Vec<NoteInsertion>,
     inserted_before_base: Vec<usize>,
+    inserted_total: usize,
 }
 
 impl Layout {
@@ -67,14 +66,13 @@ impl Layout {
             target_file: selected_file,
             target_hunk: selected_hunk,
             base,
-            inline_rows: Vec::new(),
-            side_by_side_rows: Vec::new(),
             hunk_ranges: Vec::new(),
-            row_contexts: Vec::new(),
+            note_insertions: Vec::new(),
+            row_count: 0,
         };
         layout.refresh_notes(session, notes, expanded_note_ids);
-        timer.field("base_rows", layout.base.row_contexts.len());
-        timer.field("rows", layout.row_contexts.len());
+        timer.field("base_rows", layout.base.plan.row_count);
+        timer.field("rows", layout.row_count);
         layout
     }
 
@@ -118,7 +116,6 @@ impl Layout {
         }
 
         let flatten_start = Instant::now();
-        refresh_base_layout(&mut self.base, session, self.side_by_side_width);
         let flatten_ms = flatten_start.elapsed().as_millis();
 
         let note_start = Instant::now();
@@ -140,8 +137,8 @@ impl Layout {
             ("extra_hunks", window.extra_hunks.to_string()),
             ("queued_hunks", window.queued_hunks.to_string()),
             ("applied_hunks", window.applied_hunks.to_string()),
-            ("base_rows", self.base.row_contexts.len().to_string()),
-            ("rows", self.row_contexts.len().to_string()),
+            ("base_rows", self.base.plan.row_count.to_string()),
+            ("rows", self.row_count.to_string()),
         ];
         if let Some(rss_mb) = log::current_rss_mb() {
             fields.push(("rss_mb", rss_mb));
@@ -184,7 +181,6 @@ impl Layout {
         );
         *hunk_node = node;
 
-        refresh_base_layout(&mut self.base, session, self.side_by_side_width);
         self.refresh_notes(session, notes, expanded_note_ids);
         true
     }
@@ -198,7 +194,7 @@ impl Layout {
         let mut timer = log::timer("layout_refresh_notes");
         timer.field("notes", notes.len());
         timer.field("expanded_notes", expanded_note_ids.len());
-        timer.field("base_rows", self.base.row_contexts.len());
+        timer.field("base_rows", self.base.plan.row_count);
         let overlay = inject_notes(
             session,
             &self.base,
@@ -212,18 +208,9 @@ impl Layout {
             self.base.hunk_ranges.clone(),
             &overlay.inserted_before_base,
         );
-        self.inline_rows = overlay.inline_rows;
-        self.side_by_side_rows = overlay.side_by_side_rows;
-        self.row_contexts = overlay.row_contexts;
-        timer.field("rows", self.row_contexts.len());
-    }
-
-    pub fn line_count_for_mode(&self, side_by_side: bool) -> usize {
-        if side_by_side {
-            self.side_by_side_rows.len()
-        } else {
-            self.inline_rows.len()
-        }
+        self.note_insertions = overlay.insertions;
+        self.row_count = self.base.plan.row_count + overlay.inserted_total;
+        timer.field("rows", self.row_count);
     }
 }
 
@@ -263,18 +250,14 @@ fn build_base_layout(
         overscan_rows,
         nav_direction,
     );
-    let render_rows = layout_plan_to_render_rows(session, &tree, &plan, side_by_side_width);
     let hunk_ranges = plan.hunk_ranges.clone();
 
     let base = BaseLayout {
         tree,
         plan,
-        inline_rows: render_rows.inline_rows,
-        side_by_side_rows: render_rows.side_by_side_rows,
         hunk_ranges,
-        row_contexts: render_rows.row_contexts,
     };
-    timer.field("base_rows", base.row_contexts.len());
+    timer.field("base_rows", base.plan.row_count);
     timer.field("hunk_ranges", base.hunk_ranges.len());
     timer.field("built_hunks", window.built_hunks);
     timer.field("evicted_hunks", window.evicted_hunks);
@@ -446,15 +429,6 @@ fn build_hunk_node(
             row_contexts,
         },
     }
-}
-
-fn refresh_base_layout(base: &mut BaseLayout, session: &DiffSession, side_by_side_width: usize) {
-    let render_rows =
-        layout_plan_to_render_rows(session, &base.tree, &base.plan, side_by_side_width);
-    base.inline_rows = render_rows.inline_rows;
-    base.side_by_side_rows = render_rows.side_by_side_rows;
-    base.row_contexts = render_rows.row_contexts;
-    base.hunk_ranges = base.plan.hunk_ranges.clone();
 }
 
 struct WindowResult {
@@ -853,15 +827,22 @@ fn inject_notes(
     inline_width: usize,
     side_by_side_width: usize,
 ) -> NoteOverlay {
-    let note_anchors = build_note_anchors(session, notes, &base.row_contexts);
-    let mut inline_rows = Vec::new();
-    let mut side_by_side_rows = Vec::new();
-    let mut row_contexts = Vec::new();
-    let mut inserted_before_base = vec![0usize; base.row_contexts.len() + 1];
+    if notes.is_empty() {
+        return NoteOverlay {
+            insertions: Vec::new(),
+            inserted_before_base: vec![0usize; base.plan.row_count + 1],
+            inserted_total: 0,
+        };
+    }
+
+    let base_row_contexts = plan_row_contexts(session, &base.plan);
+    let note_anchors = build_note_anchors(session, notes, &base_row_contexts);
+    let mut insertions = Vec::new();
+    let mut inserted_before_base = vec![0usize; base.plan.row_count + 1];
     let mut inserted_total = 0usize;
     let note_wrap_width = inline_width.min(side_by_side_width);
 
-    for base_index in 0..base.row_contexts.len() {
+    for base_index in 0..base.plan.row_count {
         inserted_before_base[base_index] = inserted_total;
         for note in note_anchors
             .iter()
@@ -871,60 +852,54 @@ fn inject_notes(
             let expanded = expanded_note_ids.contains(&note.id);
             let note_rows = build_note_rows(note, note_wrap_width, expanded);
             let note_context = RowContext {
-                file_index: base.row_contexts[base_index].file_index,
-                hunk_index: base.row_contexts[base_index].hunk_index,
+                file_index: base_row_contexts[base_index].file_index,
+                hunk_index: base_row_contexts[base_index].hunk_index,
                 kind: RowKind::Note,
                 old_lineno: None,
                 new_lineno: None,
                 note_id: Some(note.id),
             };
 
-            append_note_rows(
-                &mut inline_rows,
-                &mut side_by_side_rows,
-                &mut row_contexts,
+            insertions.push(build_note_insertion(
+                base_index,
                 &note_rows,
                 note,
                 note_context,
                 inline_width,
                 side_by_side_width,
-            );
+            ));
 
             inserted_total += note_rows.len();
         }
-
-        inline_rows.push(base.inline_rows[base_index].clone());
-        side_by_side_rows.push(base.side_by_side_rows[base_index].clone());
-        row_contexts.push(base.row_contexts[base_index]);
     }
-    inserted_before_base[base.row_contexts.len()] =
-        row_contexts.len().saturating_sub(base.row_contexts.len());
+    inserted_before_base[base.plan.row_count] = inserted_total;
 
     NoteOverlay {
-        inline_rows,
-        side_by_side_rows,
-        row_contexts,
+        insertions,
         inserted_before_base,
+        inserted_total,
     }
 }
 
-fn append_note_rows(
-    inline_rows: &mut Vec<RenderRow>,
-    side_by_side_rows: &mut Vec<RenderRow>,
-    row_contexts: &mut Vec<RowContext>,
+fn build_note_insertion(
+    base_index: usize,
     note_rows: &[String],
     note: &Note,
     note_context: RowContext,
     inline_width: usize,
     side_by_side_width: usize,
-) {
-    for line in render_note_rows(note_rows, inline_width) {
-        inline_rows.push(RenderRow::Note(line));
-        row_contexts.push(note_context);
-    }
-
-    for line in render_side_by_side_note_rows(note_rows, side_by_side_width, note) {
-        side_by_side_rows.push(RenderRow::Note(line));
+) -> NoteInsertion {
+    NoteInsertion {
+        base_index,
+        inline_rows: render_note_rows(note_rows, inline_width)
+            .into_iter()
+            .map(RenderRow::Note)
+            .collect(),
+        side_by_side_rows: render_side_by_side_note_rows(note_rows, side_by_side_width, note)
+            .into_iter()
+            .map(RenderRow::Note)
+            .collect(),
+        context: note_context,
     }
 }
 
