@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::diff::{DiffFile, DiffSession};
 use crate::layout::{Layout, LayoutWorker, RowContext};
 use crate::note::{Note, NoteTarget};
@@ -8,7 +10,7 @@ use crate::state::{
 
 #[derive(Debug)]
 pub struct App {
-    pub session: DiffSession,
+    pub session: Arc<DiffSession>,
     pub layout: Option<Layout>,
     pub layout_worker: LayoutWorker,
     pub global: GlobalState,
@@ -19,10 +21,11 @@ pub struct App {
 
 impl App {
     pub fn new(session: DiffSession) -> Self {
+        let session = Arc::new(session);
         Self {
-            session,
+            session: Arc::clone(&session),
             layout: None,
-            layout_worker: LayoutWorker::new(),
+            layout_worker: LayoutWorker::new(session),
             global: GlobalState {
                 running: true,
                 mode: DiffMode::SideBySide,

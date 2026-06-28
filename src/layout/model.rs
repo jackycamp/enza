@@ -1,5 +1,7 @@
 use ratatui::text::Line;
 
+use crate::state::NavDirection;
+
 #[derive(Clone, Debug)]
 pub struct HunkRange {
     pub file_index: usize,
@@ -88,8 +90,12 @@ pub struct Layout {
     pub inline_width: usize,
     pub side_by_side_width: usize,
     pub target_generation: u64,
+    pub target_generation_ready: bool,
     pub target_file: usize,
     pub target_hunk: usize,
+    pub target_viewport_rows: usize,
+    pub target_overscan_rows: usize,
+    pub target_nav_direction: Option<NavDirection>,
     pub base: BaseLayout,
     pub hunk_ranges: Vec<HunkRange>,
     pub note_insertions: Vec<NoteInsertion>,

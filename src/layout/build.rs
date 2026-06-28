@@ -82,8 +82,12 @@ impl Layout {
             inline_width: options.widths.inline,
             side_by_side_width: options.widths.side_by_side,
             target_generation: 0,
+            target_generation_ready: false,
             target_file: options.target.selected_file,
             target_hunk: options.target.selected_hunk,
+            target_viewport_rows: options.target.viewport_rows,
+            target_overscan_rows: options.target.overscan_rows,
+            target_nav_direction: options.target.nav_direction,
             base,
             hunk_ranges: Vec::new(),
             note_insertions: Vec::new(),
@@ -127,10 +131,10 @@ impl Layout {
         expanded_note_ids: &[u64],
         target: HunkWindowTarget,
     ) -> bool {
-        if self.target_file != target.selected_file || self.target_hunk != target.selected_hunk {
-            self.target_generation = self.target_generation.wrapping_add(1);
-            self.target_file = target.selected_file;
-            self.target_hunk = target.selected_hunk;
+        if !self.target_generation_ready || self.target_window_changed(target) {
+            self.target_generation = worker.next_generation();
+            self.target_generation_ready = true;
+            self.store_target_window(target);
             reset_loading_hunks(&mut self.base.tree);
             worker.set_generation(self.target_generation);
         }
@@ -184,6 +188,22 @@ impl Layout {
         }
         log::add_event("layout_expand", &fields);
         true
+    }
+
+    fn target_window_changed(&self, target: HunkWindowTarget) -> bool {
+        self.target_file != target.selected_file
+            || self.target_hunk != target.selected_hunk
+            || self.target_viewport_rows != target.viewport_rows
+            || self.target_overscan_rows != target.overscan_rows
+            || self.target_nav_direction != target.nav_direction
+    }
+
+    fn store_target_window(&mut self, target: HunkWindowTarget) {
+        self.target_file = target.selected_file;
+        self.target_hunk = target.selected_hunk;
+        self.target_viewport_rows = target.viewport_rows;
+        self.target_overscan_rows = target.overscan_rows;
+        self.target_nav_direction = target.nav_direction;
     }
 
     /// Synchronously builds the selected hunk if its rows are not loaded.
