@@ -58,7 +58,7 @@ pub enum RowId {
 pub struct PlannedHunk {
     pub file_index: usize,
     pub hunk_index: usize,
-    /// Logical row index of the hunk header in the base layout.
+    /// Base row index of the hunk header.
     pub start: usize,
     /// Number of diff lines; the header and trailing spacer are derived.
     pub line_count: usize,
@@ -67,19 +67,19 @@ pub struct PlannedHunk {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedFile {
     pub file_index: usize,
-    /// Logical row index of the file separator.
+    /// Base row index of the file separator.
     pub start: usize,
-    /// Logical row index of the blank row after the file's hunks.
+    /// Base row index of the blank row after the file's hunks.
     pub trailing_spacer: usize,
     pub hunks: Vec<PlannedHunk>,
 }
 
 #[derive(Clone, Debug)]
 pub struct LayoutPlan {
-    /// Compact file/hunk spans. This replaces storing one planned row per line.
+    /// File and hunk start rows. This replaces storing one planned row per line.
     pub files: Vec<PlannedFile>,
     pub hunk_ranges: Vec<HunkRange>,
-    /// Total base rows before note overlays are inserted.
+    /// Total base rows before note rows are inserted.
     pub row_count: usize,
 }
 
@@ -130,7 +130,7 @@ pub struct HunkNode {
 
 #[derive(Clone, Debug, Default)]
 pub struct CachedRows {
-    /// Rendered rows for resident hunks and always-resident file chrome.
+    /// Rendered rows for loaded hunks and always-loaded file header/separator rows.
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub row_contexts: Vec<RowContext>,

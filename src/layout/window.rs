@@ -1,9 +1,9 @@
-//! Resident hunk window management.
+//! Loaded hunk management.
 //!
-//! The planner chooses which hunks should have rendered rows cached around the
-//! selected hunk and viewport. The apply functions then build, queue, or evict
-//! cached hunk rows to match that plan. Logical row positions come from
-//! `LayoutPlan`; this module only controls render-cache residency.
+//! The planner chooses which hunks around the selected hunk should have rendered
+//! rows loaded. The apply functions then build, queue, or unload hunk rows to
+//! match that choice. Row numbers come from `LayoutPlan`; this module only
+//! decides which hunk render rows are currently kept in memory.
 
 use std::collections::HashSet;
 
@@ -13,7 +13,7 @@ use crate::layout::model::{CachedRows, LayoutTree, NodeStatus};
 use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
 use crate::state::NavDirection;
 
-/// Render widths used when building cached hunk rows.
+/// Render widths used when building hunk rows.
 ///
 /// # Example
 ///
@@ -30,7 +30,7 @@ pub(crate) struct LayoutWidths {
     pub side_by_side: usize,
 }
 
-/// Selection and viewport inputs used to choose the resident hunk window.
+/// Selection and viewport inputs used to choose which hunks are loaded.
 ///
 /// # Example
 ///
@@ -118,13 +118,13 @@ struct ResidentHunkPlan {
 }
 
 impl ResidentHunkPlan {
-    /// Returns whether a hunk should have resident rendered rows.
+    /// Returns whether a hunk should have rendered rows loaded.
     fn contains(&self, file_index: usize, hunk_index: usize) -> bool {
         self.desired.contains(&(file_index, hunk_index))
     }
 }
 
-/// Synchronously builds every hunk required by the initial resident window.
+/// Synchronously builds every hunk needed for the first frame.
 ///
 /// Used during full layout construction so the first viewport has ready content
 /// without waiting for the worker thread.
@@ -183,11 +183,11 @@ pub(super) fn apply_resident_hunk_window_sync(
     }
 }
 
-/// Applies the resident hunk window incrementally using the worker.
+/// Updates loaded hunks incrementally using the worker.
 ///
 /// This drains finished worker results, queues missing hunks up to `limits`, and
-/// evicts ready hunks that are no longer desired once the window is otherwise
-/// satisfied.
+/// unloads hunks that are no longer needed once all needed hunks are ready or
+/// queued.
 pub(super) fn apply_resident_hunk_window(
     tree: &mut LayoutTree,
     worker: &LayoutWorker,
@@ -325,7 +325,7 @@ pub(super) fn apply_resident_hunk_window(
     }
 }
 
-/// Plans which hunks should have resident rendered rows around the target hunk.
+/// Chooses which hunks should have rendered rows loaded.
 ///
 /// The selected hunk is always included. Rows after the selected hunk cover the
 /// viewport plus overscan; rows before it cover overscan only.

@@ -1,12 +1,11 @@
 //! Diff layout pipeline.
 //!
 //! The source diff lives in `DiffSession`; layout should not duplicate that data.
-//! `plan` builds a compact logical row map from file/hunk spans, `window` decides
-//! which hunks should have rendered rows resident, and `lines` materializes only
-//! the rows visible in the current viewport. Notes are stored as overlay
-//! insertions on top of the base plan. Keep these layers separate so unloaded
-//! hunks still have stable logical row positions without forcing all rows to be
-//! rendered or stored in `Layout`.
+//! `plan` records where each file and hunk starts, `window` decides which hunks
+//! have rendered rows loaded, and `lines` renders only the rows visible on
+//! screen. Notes are inserted before base rows instead of changing the base row
+//! map. Keep these layers separate so unloaded hunks still keep stable row
+//! numbers without storing rendered rows for the whole diff.
 
 mod access;
 mod build;

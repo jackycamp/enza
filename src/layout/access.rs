@@ -1,19 +1,18 @@
 //! Row lookup helpers for `Layout`.
 //!
-//! These methods translate between public row indexes and the compact base plan
-//! plus note overlays. They are deliberately lookup-oriented: keeping a full
-//! `Vec<RowContext>` on `Layout` would reintroduce the per-row storage that the
-//! compact plan avoids.
+//! These methods translate rendered row numbers to either base rows or inserted
+//! note rows. They are lookup-oriented: storing a full `Vec<RowContext>` on
+//! `Layout` would bring back one entry per rendered row.
 
 use crate::diff::DiffSession;
 use crate::layout::model::{Layout, LayoutRowLocation, NoteInsertion, RowContext, RowKind};
 use crate::layout::plan::{plan_row_index_for_context, row_context_for_plan_row};
 
 impl Layout {
-    /// Returns the total rendered row count for the current layout mode.
+    /// Returns the number of rows the UI can scroll through.
     ///
-    /// Inline and side-by-side modes share the same logical row count; only row
-    /// contents differ.
+    /// Inline and side-by-side modes have the same row count; only row contents
+    /// differ.
     ///
     /// # Example
     ///
@@ -29,10 +28,10 @@ impl Layout {
         self.row_count
     }
 
-    /// Resolves a rendered row index into its semantic context.
+    /// Returns what a rendered row represents.
     ///
-    /// Base rows are looked up through the compact plan; note rows are resolved
-    /// through overlay insertions.
+    /// Base rows are looked up through `LayoutPlan`; inserted note rows are
+    /// looked up through `note_insertions`.
     ///
     /// # Example
     ///
@@ -60,7 +59,7 @@ impl Layout {
         }
     }
 
-    /// Materializes all row contexts, including note overlays.
+    /// Builds a `RowContext` vector for every rendered row.
     ///
     /// Prefer `row_context` for point lookups. This exists for selection and note
     /// APIs that still need slice-style access.
@@ -68,9 +67,10 @@ impl Layout {
     /// # Example
     ///
     /// ```rust,ignore
+    /// // Given layout.row_count == 128:
     /// let row_contexts = layout.row_contexts(&session);
     /// let target = note_target_for_range(&session.files, &row_contexts, start, end, cursor)?;
-    /// // -> Vec<RowContext> with row_contexts.len() == layout.row_count
+    /// // -> Vec<RowContext> with row_contexts.len() == 128
     /// ```
     pub fn row_contexts(&self, session: &DiffSession) -> Vec<RowContext> {
         (0..self.row_count)
@@ -78,10 +78,10 @@ impl Layout {
             .collect()
     }
 
-    /// Finds the rendered row index for a semantic row context.
+    /// Finds the rendered row index for a row description.
     ///
-    /// Base contexts are mapped through `LayoutPlan`; note contexts are mapped
-    /// through overlay insertion positions.
+    /// Base rows are mapped through `LayoutPlan`; note rows are mapped through
+    /// insertion positions.
     ///
     /// # Example
     ///
@@ -118,7 +118,7 @@ impl Layout {
         Some(base_index + inserted_before_or_at)
     }
 
-    /// Splits a rendered row index into either a base-plan row or note row.
+    /// Splits a rendered row index into either a base row or inserted note row.
     pub(crate) fn locate_row(&self, row: usize) -> Option<LayoutRowLocation> {
         if row >= self.row_count {
             return None;
@@ -150,7 +150,7 @@ impl Layout {
     }
 }
 
-/// Finds the first rendered row for a note overlay context.
+/// Finds the first rendered row for an inserted note row.
 fn note_row_index(insertions: &[NoteInsertion], target: RowContext) -> Option<usize> {
     let mut inserted_before = 0usize;
     for insertion in insertions {

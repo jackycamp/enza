@@ -33,9 +33,9 @@ struct NoteOverlay {
 impl Layout {
     /// Builds a fresh layout for the current diff, notes, dimensions, and target hunk.
     ///
-    /// This performs a synchronous initial hunk-window build so the first frame
-    /// has resident rows for the selected area. Later movement should use
-    /// `ensure_hunk_window` so the existing cache can be reused.
+    /// This synchronously builds rows for the selected area so the first frame
+    /// has visible content. Later movement should use
+    /// `ensure_hunk_window` so already-loaded hunk rows can be reused.
     ///
     /// # Example
     ///
@@ -95,10 +95,10 @@ impl Layout {
         layout
     }
 
-    /// Refreshes the resident hunk cache for a new viewport or selected hunk.
+    /// Updates loaded hunk rows for a new viewport or selected hunk.
     ///
-    /// Returns `true` when rows were built, queued, applied, or evicted and the
-    /// note overlay was refreshed. Target changes advance the worker generation
+    /// Returns `true` when hunk rows were built, queued, applied, or unloaded and
+    /// inserted note rows were refreshed. Target changes advance the worker generation
     /// and discard stale loading hunks.
     ///
     /// # Example
@@ -186,10 +186,10 @@ impl Layout {
         true
     }
 
-    /// Synchronously builds the selected hunk if it is not resident.
+    /// Synchronously builds the selected hunk if its rows are not loaded.
     ///
     /// This is used for explicit reveal/jump actions where the UI needs the
-    /// target hunk available immediately rather than waiting for the worker.
+    /// target hunk available immediately instead of waiting for the worker.
     pub fn ensure_selected_hunk_ready_sync(
         &mut self,
         session: &DiffSession,
@@ -228,7 +228,7 @@ impl Layout {
         true
     }
 
-    /// Rebuilds note overlay rows and adjusts hunk ranges for inserted notes.
+    /// Rebuilds inserted note rows and adjusts hunk ranges for those insertions.
     ///
     /// Base layout rows are left untouched; only note insertions and derived
     /// row counts/ranges are refreshed.

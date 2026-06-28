@@ -1,9 +1,9 @@
-//! Viewport row materialization.
+//! Viewport row rendering.
 //!
-//! Rendering starts from `RowViewState.scroll` and asks the plan/cache stack for
-//! only the rows that fit in the current viewport. Base rows come from the
-//! compact plan and resident hunk cache; note rows come from overlay insertions.
-//! Avoid adding APIs here that rebuild all rows just to draw a frame.
+//! Rendering starts at `RowViewState.scroll` and asks for only the rows that fit
+//! on screen. Base rows come from `LayoutPlan` and loaded hunk rows; note rows
+//! come from inserted note rows. Avoid APIs here that rebuild all rows just to
+//! draw one frame.
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -17,10 +17,10 @@ use crate::layout::plan::plan_row_to_render_rows;
 use crate::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
 
 impl Layout {
-    /// Renders the visible viewport rows for the current view state.
+    /// Renders the rows visible on screen.
     ///
-    /// This is intentionally bounded by `max_rows`; it must not materialize the
-    /// whole layout just to draw one frame.
+    /// This is intentionally bounded by `max_rows`; it must not render the whole
+    /// layout just to draw one frame.
     ///
     /// # Example
     ///
@@ -377,7 +377,7 @@ fn patch_line_background(line: Line<'static>, patch: Style) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Builds the shared file-header chrome with file label and change counts.
+/// Builds the shared file header line with file label and change counts.
 fn chrome_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Line<'static> {
     let (additions, deletions) = file.change_counts();
     let title_style = if selected {
