@@ -95,13 +95,13 @@ pub(crate) struct LayoutBuildOptions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct WindowLimits {
+pub(super) struct LoadedHunkLimits {
     pub max_builds: usize,
     pub max_evictions: usize,
 }
 
 #[derive(Debug)]
-pub(super) struct WindowResult {
+pub(super) struct LoadedHunkUpdate {
     pub changed: bool,
     pub built_hunks: usize,
     pub evicted_hunks: usize,
@@ -113,11 +113,11 @@ pub(super) struct WindowResult {
     pub applied_hunks: usize,
 }
 
-struct ResidentHunkPlan {
+struct LoadedHunkPlan {
     desired: HashSet<(usize, usize)>,
 }
 
-impl ResidentHunkPlan {
+impl LoadedHunkPlan {
     /// Returns whether a hunk should have rendered rows loaded.
     fn contains(&self, file_index: usize, hunk_index: usize) -> bool {
         self.desired.contains(&(file_index, hunk_index))
@@ -128,13 +128,13 @@ impl ResidentHunkPlan {
 ///
 /// Used during full layout construction so the first viewport has ready content
 /// without waiting for the worker thread.
-pub(super) fn apply_resident_hunk_window_sync(
+pub(super) fn apply_loaded_hunk_window_sync(
     tree: &mut LayoutTree,
     session: &DiffSession,
     widths: LayoutWidths,
     target: HunkWindowTarget,
-) -> WindowResult {
-    let plan = plan_resident_hunk_window(session, target);
+) -> LoadedHunkUpdate {
+    let plan = plan_loaded_hunks(session, target);
     let mut changed = false;
     let mut built_hunks = 0usize;
     let mut built_rows = 0usize;
@@ -170,7 +170,7 @@ pub(super) fn apply_resident_hunk_window_sync(
         }
     }
 
-    WindowResult {
+    LoadedHunkUpdate {
         changed,
         built_hunks,
         evicted_hunks: 0,
@@ -188,16 +188,16 @@ pub(super) fn apply_resident_hunk_window_sync(
 /// This drains finished worker results, queues missing hunks up to `limits`, and
 /// unloads hunks that are no longer needed once all needed hunks are ready or
 /// queued.
-pub(super) fn apply_resident_hunk_window(
+pub(super) fn apply_loaded_hunk_window(
     tree: &mut LayoutTree,
     worker: &LayoutWorker,
     generation: u64,
     session: &DiffSession,
     widths: LayoutWidths,
     target: HunkWindowTarget,
-    limits: WindowLimits,
-) -> WindowResult {
-    let plan = plan_resident_hunk_window(session, target);
+    limits: LoadedHunkLimits,
+) -> LoadedHunkUpdate {
+    let plan = plan_loaded_hunks(session, target);
     let mut changed = false;
     let mut built_hunks = 0usize;
     let mut evicted_hunks = 0usize;
@@ -312,7 +312,7 @@ pub(super) fn apply_resident_hunk_window(
         }
     }
 
-    WindowResult {
+    LoadedHunkUpdate {
         changed,
         built_hunks,
         evicted_hunks,
@@ -329,7 +329,7 @@ pub(super) fn apply_resident_hunk_window(
 ///
 /// The selected hunk is always included. Rows after the selected hunk cover the
 /// viewport plus overscan; rows before it cover overscan only.
-fn plan_resident_hunk_window(session: &DiffSession, target: HunkWindowTarget) -> ResidentHunkPlan {
+fn plan_loaded_hunks(session: &DiffSession, target: HunkWindowTarget) -> LoadedHunkPlan {
     let all_hunks: Vec<(usize, usize, usize)> = session
         .files
         .iter()
@@ -343,7 +343,7 @@ fn plan_resident_hunk_window(session: &DiffSession, target: HunkWindowTarget) ->
         .collect();
 
     if all_hunks.is_empty() {
-        return ResidentHunkPlan {
+        return LoadedHunkPlan {
             desired: HashSet::new(),
         };
     }
@@ -422,7 +422,7 @@ fn plan_resident_hunk_window(session: &DiffSession, target: HunkWindowTarget) ->
         }
     }
 
-    ResidentHunkPlan { desired }
+    LoadedHunkPlan { desired }
 }
 
 /// Adds the next hunk after the selected range if more downward coverage is needed.
@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn planner_expands_after_the_selected_hunk_to_cover_the_viewport() {
         let session = session_with_hunks(4);
-        let plan = plan_resident_hunk_window(
+        let plan = plan_loaded_hunks(
             &session,
             HunkWindowTarget {
                 selected_hunk: 1,
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn planner_uses_overscan_on_both_sides() {
         let session = session_with_hunks(4);
-        let plan = plan_resident_hunk_window(
+        let plan = plan_loaded_hunks(
             &session,
             HunkWindowTarget {
                 selected_hunk: 1,
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(desired_hunks(&plan), vec![(0, 0), (0, 1), (0, 2)]);
     }
 
-    fn desired_hunks(plan: &ResidentHunkPlan) -> Vec<(usize, usize)> {
+    fn desired_hunks(plan: &LoadedHunkPlan) -> Vec<(usize, usize)> {
         let mut desired: Vec<_> = plan.desired.iter().copied().collect();
         desired.sort_unstable();
         desired

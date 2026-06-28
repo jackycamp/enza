@@ -17,8 +17,8 @@ use crate::layout::notes::{
 };
 use crate::layout::plan::{build_layout_plan, plan_row_contexts};
 use crate::layout::window::{
-    HunkWindowTarget, LayoutBuildOptions, LayoutWidths, WindowLimits, apply_resident_hunk_window,
-    apply_resident_hunk_window_sync,
+    HunkWindowTarget, LayoutBuildOptions, LayoutWidths, LoadedHunkLimits, apply_loaded_hunk_window,
+    apply_loaded_hunk_window_sync,
 };
 use crate::layout::worker::LayoutWorker;
 use crate::log;
@@ -135,7 +135,7 @@ impl Layout {
             worker.set_generation(self.target_generation);
         }
         let expand_start = Instant::now();
-        let window = apply_resident_hunk_window(
+        let window = apply_loaded_hunk_window(
             &mut self.base.tree,
             worker,
             self.target_generation,
@@ -145,7 +145,7 @@ impl Layout {
                 side_by_side: self.side_by_side_width,
             },
             target,
-            WindowLimits {
+            LoadedHunkLimits {
                 max_builds: 2,
                 max_evictions: 1,
             },
@@ -281,7 +281,7 @@ fn build_base_layout(
     timer.field("files", session.files.len());
     let plan = build_layout_plan(session);
     let mut tree = build_layout_tree(session, widths.inline, widths.side_by_side);
-    let window = apply_resident_hunk_window_sync(&mut tree, session, widths, target);
+    let window = apply_loaded_hunk_window_sync(&mut tree, session, widths, target);
     let hunk_ranges = plan.hunk_ranges.clone();
 
     let base = BaseLayout {
