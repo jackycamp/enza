@@ -58,22 +58,28 @@ pub enum RowId {
 pub struct PlannedHunk {
     pub file_index: usize,
     pub hunk_index: usize,
+    /// Logical row index of the hunk header in the base layout.
     pub start: usize,
+    /// Number of diff lines; the header and trailing spacer are derived.
     pub line_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedFile {
     pub file_index: usize,
+    /// Logical row index of the file separator.
     pub start: usize,
+    /// Logical row index of the blank row after the file's hunks.
     pub trailing_spacer: usize,
     pub hunks: Vec<PlannedHunk>,
 }
 
 #[derive(Clone, Debug)]
 pub struct LayoutPlan {
+    /// Compact file/hunk spans. This replaces storing one planned row per line.
     pub files: Vec<PlannedFile>,
     pub hunk_ranges: Vec<HunkRange>,
+    /// Total base rows before note overlays are inserted.
     pub row_count: usize,
 }
 
@@ -124,6 +130,7 @@ pub struct HunkNode {
 
 #[derive(Clone, Debug, Default)]
 pub struct CachedRows {
+    /// Rendered rows for resident hunks and always-resident file chrome.
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub row_contexts: Vec<RowContext>,
@@ -131,6 +138,7 @@ pub struct CachedRows {
 
 #[derive(Clone, Debug)]
 pub struct NoteInsertion {
+    /// Base row before which these note rows are inserted.
     pub base_index: usize,
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
@@ -138,6 +146,7 @@ pub struct NoteInsertion {
 }
 
 impl NoteInsertion {
+    /// Returns how many rendered rows this note inserts before its base row.
     pub fn len(&self) -> usize {
         self.inline_rows.len()
     }

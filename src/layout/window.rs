@@ -1,3 +1,10 @@
+//! Resident hunk window management.
+//!
+//! The planner chooses which hunks should have rendered rows cached around the
+//! selected hunk and viewport. The apply functions then build, queue, or evict
+//! cached hunk rows to match that plan. Logical row positions come from
+//! `LayoutPlan`; this module only controls render-cache residency.
+
 use std::collections::HashSet;
 
 use crate::diff::DiffSession;
@@ -6,12 +13,43 @@ use crate::layout::model::{CachedRows, LayoutTree, NodeStatus};
 use crate::layout::worker::{HunkBuildRequest, LayoutWorker};
 use crate::state::NavDirection;
 
+/// Render widths used when building cached hunk rows.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let widths = LayoutWidths {
+///     inline: 80,
+///     side_by_side: 120,
+/// };
+/// // -> LayoutWidths { inline: 80, side_by_side: 120 }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LayoutWidths {
     pub inline: usize,
     pub side_by_side: usize,
 }
 
+/// Selection and viewport inputs used to choose the resident hunk window.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let target = HunkWindowTarget {
+///     selected_file: 0,
+///     selected_hunk: 2,
+///     viewport_rows: 40,
+///     overscan_rows: 80,
+///     nav_direction: Some(NavDirection::Down),
+/// };
+/// // -> HunkWindowTarget {
+/// //      selected_file: 0,
+/// //      selected_hunk: 2,
+/// //      viewport_rows: 40,
+/// //      overscan_rows: 80,
+/// //      nav_direction: Some(NavDirection::Down),
+/// //    }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HunkWindowTarget {
     pub selected_file: usize,
@@ -21,6 +59,35 @@ pub(crate) struct HunkWindowTarget {
     pub nav_direction: Option<NavDirection>,
 }
 
+/// Inputs required to build a full layout from scratch.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let options = LayoutBuildOptions {
+///     widths: LayoutWidths {
+///         inline: 80,
+///         side_by_side: 120,
+///     },
+///     target: HunkWindowTarget {
+///         selected_file: 0,
+///         selected_hunk: 2,
+///         viewport_rows: 40,
+///         overscan_rows: 80,
+///         nav_direction: None,
+///     },
+/// };
+/// // -> LayoutBuildOptions {
+/// //      widths: LayoutWidths { inline: 80, side_by_side: 120 },
+/// //      target: HunkWindowTarget {
+/// //          selected_file: 0,
+/// //          selected_hunk: 2,
+/// //          viewport_rows: 40,
+/// //          overscan_rows: 80,
+/// //          nav_direction: None,
+/// //      },
+/// //    }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LayoutBuildOptions {
     pub widths: LayoutWidths,
@@ -51,11 +118,16 @@ struct ResidentHunkPlan {
 }
 
 impl ResidentHunkPlan {
+    /// Returns whether a hunk should have resident rendered rows.
     fn contains(&self, file_index: usize, hunk_index: usize) -> bool {
         self.desired.contains(&(file_index, hunk_index))
     }
 }
 
+/// Synchronously builds every hunk required by the initial resident window.
+///
+/// Used during full layout construction so the first viewport has ready content
+/// without waiting for the worker thread.
 pub(super) fn apply_resident_hunk_window_sync(
     tree: &mut LayoutTree,
     session: &DiffSession,
@@ -111,6 +183,11 @@ pub(super) fn apply_resident_hunk_window_sync(
     }
 }
 
+/// Applies the resident hunk window incrementally using the worker.
+///
+/// This drains finished worker results, queues missing hunks up to `limits`, and
+/// evicts ready hunks that are no longer desired once the window is otherwise
+/// satisfied.
 pub(super) fn apply_resident_hunk_window(
     tree: &mut LayoutTree,
     worker: &LayoutWorker,
@@ -248,6 +325,10 @@ pub(super) fn apply_resident_hunk_window(
     }
 }
 
+/// Plans which hunks should have resident rendered rows around the target hunk.
+///
+/// The selected hunk is always included. Rows after the selected hunk cover the
+/// viewport plus overscan; rows before it cover overscan only.
 fn plan_resident_hunk_window(session: &DiffSession, target: HunkWindowTarget) -> ResidentHunkPlan {
     let all_hunks: Vec<(usize, usize, usize)> = session
         .files
@@ -344,6 +425,7 @@ fn plan_resident_hunk_window(session: &DiffSession, target: HunkWindowTarget) ->
     ResidentHunkPlan { desired }
 }
 
+/// Adds the next hunk after the selected range if more downward coverage is needed.
 fn try_extend_down(
     all_hunks: &[(usize, usize, usize)],
     desired: &mut HashSet<(usize, usize)>,
@@ -362,6 +444,7 @@ fn try_extend_down(
     true
 }
 
+/// Adds the previous hunk before the selected range if more upward coverage is needed.
 fn try_extend_up(
     all_hunks: &[(usize, usize, usize)],
     desired: &mut HashSet<(usize, usize)>,

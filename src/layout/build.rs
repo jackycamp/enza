@@ -31,6 +31,36 @@ struct NoteOverlay {
 }
 
 impl Layout {
+    /// Builds a fresh layout for the current diff, notes, dimensions, and target hunk.
+    ///
+    /// This performs a synchronous initial hunk-window build so the first frame
+    /// has resident rows for the selected area. Later movement should use
+    /// `ensure_hunk_window` so the existing cache can be reused.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let target = HunkWindowTarget {
+    ///     selected_file: 0,
+    ///     selected_hunk: 2,
+    ///     viewport_rows: 40,
+    ///     overscan_rows: 80,
+    ///     nav_direction: None,
+    /// };
+    /// let layout = Layout::build(
+    ///     &app.session,
+    ///     &app.notes.items,
+    ///     &app.notes.expanded_ids,
+    ///     LayoutBuildOptions {
+    ///         widths: LayoutWidths {
+    ///             inline: 80,
+    ///             side_by_side: 120,
+    ///         },
+    ///         target,
+    ///     },
+    /// );
+    /// // -> Layout { inline_width: 80, side_by_side_width: 120, target_file: 0, target_hunk: 2, ... }
+    /// ```
     pub fn build(
         session: &DiffSession,
         notes: &[Note],
@@ -65,6 +95,30 @@ impl Layout {
         layout
     }
 
+    /// Refreshes the resident hunk cache for a new viewport or selected hunk.
+    ///
+    /// Returns `true` when rows were built, queued, applied, or evicted and the
+    /// note overlay was refreshed. Target changes advance the worker generation
+    /// and discard stale loading hunks.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let changed = layout.ensure_hunk_window(
+    ///     &app.layout_worker,
+    ///     &app.session,
+    ///     &app.notes.items,
+    ///     &app.notes.expanded_ids,
+    ///     HunkWindowTarget {
+    ///         selected_file: 0,
+    ///         selected_hunk: 3,
+    ///         viewport_rows: 40,
+    ///         overscan_rows: 80,
+    ///         nav_direction: Some(NavDirection::Down),
+    ///     },
+    /// );
+    /// // -> true
+    /// ```
     pub fn ensure_hunk_window(
         &mut self,
         worker: &LayoutWorker,
@@ -132,6 +186,10 @@ impl Layout {
         true
     }
 
+    /// Synchronously builds the selected hunk if it is not resident.
+    ///
+    /// This is used for explicit reveal/jump actions where the UI needs the
+    /// target hunk available immediately rather than waiting for the worker.
     pub fn ensure_selected_hunk_ready_sync(
         &mut self,
         session: &DiffSession,
@@ -170,6 +228,10 @@ impl Layout {
         true
     }
 
+    /// Rebuilds note overlay rows and adjusts hunk ranges for inserted notes.
+    ///
+    /// Base layout rows are left untouched; only note insertions and derived
+    /// row counts/ranges are refreshed.
     pub fn refresh_notes(
         &mut self,
         session: &DiffSession,
@@ -401,6 +463,10 @@ fn build_hunk_node(
     }
 }
 
+/// Builds cached render rows for one hunk.
+///
+/// The worker calls this off-thread, while synchronous paths use it directly
+/// when immediate hunk residency is required.
 pub(crate) fn build_hunk_node_for_worker(
     file_index: usize,
     hunk_index: usize,

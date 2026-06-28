@@ -1,3 +1,11 @@
+//! Compact logical row planning.
+//!
+//! A `LayoutPlan` stores file and hunk spans plus the total logical row count.
+//! It intentionally does not store one planned row or one rendered row per diff
+//! line. Callers resolve a row index into a `RowContext` or `RenderRow` only when
+//! they need that row, which keeps unloaded hunks addressable without allocating
+//! placeholder rows for the whole diff.
+
 use ratatui::text::Line;
 
 use crate::diff::DiffSession;
@@ -7,6 +15,10 @@ use crate::layout::model::{
     RowContext, RowId, RowKind,
 };
 
+/// Builds the compact base layout plan from the parsed diff.
+///
+/// The returned row indexes include file chrome, hunk headers, diff lines, and
+/// spacer rows, but store only file and hunk spans instead of per-row records.
 pub(super) fn build_layout_plan(session: &DiffSession) -> LayoutPlan {
     let mut files = Vec::new();
     let mut hunk_ranges = Vec::new();
@@ -51,6 +63,11 @@ pub(super) fn build_layout_plan(session: &DiffSession) -> LayoutPlan {
     }
 }
 
+/// Resolves a base-layout row index into semantic row identity.
+///
+/// This is the lookup counterpart to `build_layout_plan`; callers use it for
+/// navigation, selection, and note anchoring without requiring cached render
+/// rows to exist.
 pub(super) fn row_context_for_plan_row(
     session: &DiffSession,
     plan: &LayoutPlan,
@@ -127,6 +144,11 @@ pub(super) fn row_context_for_plan_row(
     }
 }
 
+/// Converts one base-layout row into inline and side-by-side render rows.
+///
+/// Resident hunk rows are read from `LayoutTree`; unloaded diff lines render as
+/// blank placeholders while unloaded hunk headers can still render from
+/// `DiffSession` so navigation has visible anchors.
 pub(super) fn plan_row_to_render_rows(
     session: &DiffSession,
     tree: &LayoutTree,
@@ -219,12 +241,20 @@ pub(super) fn plan_row_to_render_rows(
     }
 }
 
+/// Materializes all base row contexts for code that explicitly needs a slice.
+///
+/// This is intentionally not stored on `Layout`; use it only at boundaries such
+/// as note anchoring or tests that compare logical rows.
 pub(super) fn plan_row_contexts(session: &DiffSession, plan: &LayoutPlan) -> Vec<RowContext> {
     (0..plan.row_count)
         .filter_map(|row| row_context_for_plan_row(session, plan, row))
         .collect()
 }
 
+/// Finds the base-layout row index for a non-note row context.
+///
+/// Note rows are overlay rows and are handled by `layout::access`; this function
+/// only maps identities that belong to the compact base plan.
 pub(super) fn plan_row_index_for_context(
     session: &DiffSession,
     plan: &LayoutPlan,
@@ -271,6 +301,7 @@ pub(super) fn plan_row_index_for_context(
     }
 }
 
+/// Classifies a base row index using file and hunk spans.
 fn row_id_for_plan_row(plan: &LayoutPlan, row_index: usize) -> Option<RowId> {
     let file = file_for_row(plan, row_index)?;
     if row_index == file.start {
@@ -311,26 +342,31 @@ fn row_id_for_plan_row(plan: &LayoutPlan, row_index: usize) -> Option<RowId> {
     })
 }
 
+/// Finds the planned file span containing a base row index.
 fn file_for_row(plan: &LayoutPlan, row_index: usize) -> Option<&PlannedFile> {
     let index = plan.files.partition_point(|file| file.start <= row_index);
     let file = plan.files.get(index.checked_sub(1)?)?;
     (row_index <= file.trailing_spacer).then_some(file)
 }
 
+/// Finds a planned file by diff file index.
 fn file_for_index(plan: &LayoutPlan, file_index: usize) -> Option<&PlannedFile> {
     plan.files.get(file_index)
 }
 
+/// Finds the planned hunk span containing a base row index within a file.
 fn hunk_for_row(file: &PlannedFile, row_index: usize) -> Option<&PlannedHunk> {
     let index = file.hunks.partition_point(|hunk| hunk.start <= row_index);
     let hunk = file.hunks.get(index.checked_sub(1)?)?;
     (row_index <= hunk.start + hunk.line_count + 1).then_some(hunk)
 }
 
+/// Finds a planned hunk by diff hunk index within a file.
 fn hunk_for_index(file: &PlannedFile, hunk_index: usize) -> Option<&PlannedHunk> {
     file.hunks.get(hunk_index)
 }
 
+/// Clones the inline and side-by-side cached rows at the same cache index.
 fn cached_row_pair(rows: &CachedRows, index: usize) -> Option<(RenderRow, RenderRow)> {
     Some((
         rows.inline_rows.get(index)?.clone(),
@@ -338,6 +374,7 @@ fn cached_row_pair(rows: &CachedRows, index: usize) -> Option<(RenderRow, Render
     ))
 }
 
+/// Returns an empty inline/side-by-side row pair for unavailable render content.
 fn blank_row_pair() -> (RenderRow, RenderRow) {
     (
         RenderRow::Static(Line::default()),

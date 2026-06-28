@@ -1,3 +1,10 @@
+//! Viewport row materialization.
+//!
+//! Rendering starts from `RowViewState.scroll` and asks the plan/cache stack for
+//! only the rows that fit in the current viewport. Base rows come from the
+//! compact plan and resident hunk cache; note rows come from overlay insertions.
+//! Avoid adding APIs here that rebuild all rows just to draw a frame.
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -10,6 +17,23 @@ use crate::layout::plan::plan_row_to_render_rows;
 use crate::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
 
 impl Layout {
+    /// Renders the visible viewport rows for the current view state.
+    ///
+    /// This is intentionally bounded by `max_rows`; it must not materialize the
+    /// whole layout just to draw one frame.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let max_rows = 40;
+    /// let rows = layout.materialize_rows(
+    ///     &app.session,
+    ///     true,
+    ///     &row_view_state(&app, cursor_focused),
+    ///     max_rows,
+    /// );
+    /// // -> Vec<Line<'static>> with rows.len() <= 40
+    /// ```
     pub fn materialize_rows(
         &self,
         session: &DiffSession,
@@ -38,6 +62,7 @@ impl Layout {
             .collect()
     }
 
+    /// Renders one absolute row index, applying selection-aware row variants.
     fn render_line_for_row(
         &self,
         session: &DiffSession,
@@ -107,6 +132,7 @@ impl Layout {
     }
 }
 
+/// Builds the horizontal separator row before a file header.
 pub fn file_separator_line(width: usize) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width.max(8)),
@@ -114,6 +140,7 @@ pub fn file_separator_line(width: usize) -> Line<'static> {
     ))
 }
 
+/// Wraps normal and selected file header lines in a selectable render row.
 pub fn file_header_row(
     file_index: usize,
     normal: Line<'static>,
@@ -126,6 +153,7 @@ pub fn file_header_row(
     }
 }
 
+/// Wraps normal and selected hunk header lines in a selectable render row.
 pub fn hunk_header_row(
     file_index: usize,
     hunk_index: usize,
@@ -140,6 +168,7 @@ pub fn hunk_header_row(
     }
 }
 
+/// Renders one diff line in unified/inline mode.
 pub fn build_inline_line(
     diff_line: &DiffLine,
     width: usize,
@@ -183,6 +212,7 @@ pub fn build_inline_line(
     }
 }
 
+/// Renders one diff line in side-by-side mode.
 pub fn build_combined_side_line(
     diff_line: &DiffLine,
     width: usize,
@@ -242,6 +272,7 @@ pub fn build_combined_side_line(
     }
 }
 
+/// Builds the inline-mode file header line.
 pub fn file_header_line(file: &DiffFile, selected: bool, width: usize) -> Line<'static> {
     let label = if file.new_path != "/dev/null" {
         file.new_path.as_str()
@@ -252,6 +283,7 @@ pub fn file_header_line(file: &DiffFile, selected: bool, width: usize) -> Line<'
     chrome_line(width, label, file, selected)
 }
 
+/// Builds the side-by-side-mode file header line.
 pub fn file_side_by_side_header_line(
     file: &DiffFile,
     selected: bool,
@@ -260,6 +292,7 @@ pub fn file_side_by_side_header_line(
     chrome_line(width, &file.path, file, selected)
 }
 
+/// Builds the side-by-side hunk header with the center gutter preserved.
 pub fn side_by_side_hunk_header_line(header: &str, selected: bool, width: usize) -> Line<'static> {
     let style = if selected {
         Style::default()
@@ -280,6 +313,7 @@ pub fn side_by_side_hunk_header_line(header: &str, selected: bool, width: usize)
     ])
 }
 
+/// Combines left and right side-by-side cells with the gutter divider.
 pub fn combined_side_line(left: Line<'static>, right: Line<'static>) -> Line<'static> {
     let divider_style = Style::default().fg(Color::DarkGray);
     let mut spans = left.spans;
@@ -288,6 +322,7 @@ pub fn combined_side_line(left: Line<'static>, right: Line<'static>) -> Line<'st
     Line::from(spans)
 }
 
+/// Splits total side-by-side width into left and right content widths.
 pub fn split_side_by_side_width(width: usize) -> (usize, usize) {
     let gutter = 3;
     let usable = width.saturating_sub(gutter);
@@ -296,6 +331,7 @@ pub fn split_side_by_side_width(width: usize) -> (usize, usize) {
     (left, right)
 }
 
+/// Builds the inline-mode hunk header line.
 pub fn hunk_header_line(header: &str, selected: bool) -> Line<'static> {
     let style = if selected {
         Style::default()
@@ -308,6 +344,7 @@ pub fn hunk_header_line(header: &str, selected: bool) -> Line<'static> {
     Line::from(Span::styled(header.to_string(), style))
 }
 
+/// Applies cursor background styling to an already-rendered line.
 fn highlight_cursor_line(line: Line<'static>, focused: bool, in_selection: bool) -> Line<'static> {
     let cursor_style = if focused {
         if in_selection {
@@ -321,10 +358,12 @@ fn highlight_cursor_line(line: Line<'static>, focused: bool, in_selection: bool)
     patch_line_background(line, cursor_style)
 }
 
+/// Applies selection background styling to an already-rendered line.
 fn highlight_selected_line(line: Line<'static>) -> Line<'static> {
     patch_line_background(line, Style::default().bg(Color::Rgb(40, 40, 40)))
 }
 
+/// Patches every span in a line with the provided background style.
 fn patch_line_background(line: Line<'static>, patch: Style) -> Line<'static> {
     let spans = line
         .spans
@@ -338,6 +377,7 @@ fn patch_line_background(line: Line<'static>, patch: Style) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Builds the shared file-header chrome with file label and change counts.
 fn chrome_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Line<'static> {
     let (additions, deletions) = file.change_counts();
     let title_style = if selected {
@@ -374,6 +414,7 @@ fn chrome_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Li
     ])
 }
 
+/// Builds a unified diff line with prefix, line numbers, syntax highlighting, and padding.
 fn highlighted_prefixed_line(
     prefix: &str,
     old_lineno: Option<usize>,
@@ -442,6 +483,7 @@ fn highlighted_prefixed_line(
     Line::from(spans)
 }
 
+/// Builds an unhighlighted side-by-side cell, usually for an empty added/removed side.
 fn side_line(
     prefix: &str,
     lineno: Option<usize>,
@@ -462,6 +504,7 @@ fn side_line(
     Line::from(Span::styled(fit_text(&body, width), style))
 }
 
+/// Builds one highlighted side-by-side cell with line number and prefix.
 fn highlighted_side_line(
     prefix: &str,
     lineno: Option<usize>,
@@ -520,6 +563,7 @@ fn highlighted_side_line(
     Line::from(spans)
 }
 
+/// Returns the background tint for added and removed diff rows.
 fn diff_background(diff_kind: DiffKind) -> Option<Color> {
     match diff_kind {
         DiffKind::Context => None,
@@ -529,6 +573,7 @@ fn diff_background(diff_kind: DiffKind) -> Option<Color> {
 }
 
 impl DiffLine {
+    /// Returns the old-file line number occupied by this diff line.
     pub fn old_lineno(&self) -> Option<usize> {
         match self {
             Self::Context { old_lineno, .. } | Self::Removed { old_lineno, .. } => {
@@ -538,6 +583,7 @@ impl DiffLine {
         }
     }
 
+    /// Returns the new-file line number occupied by this diff line.
     pub fn new_lineno(&self) -> Option<usize> {
         match self {
             Self::Context { new_lineno, .. } | Self::Added { new_lineno, .. } => Some(*new_lineno),
