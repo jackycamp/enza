@@ -26,7 +26,7 @@ use crate::note::Note;
 
 struct NoteOverlay {
     insertions: Vec<NoteInsertion>,
-    inserted_before_base: Vec<usize>,
+    inserted_before_or_at_base: Vec<usize>,
     inserted_total: usize,
 }
 
@@ -270,7 +270,7 @@ impl Layout {
 
         self.hunk_ranges = adjust_hunk_ranges_for_insertions(
             self.base.hunk_ranges.clone(),
-            &overlay.inserted_before_base,
+            &overlay.inserted_before_or_at_base,
         );
         self.note_insertions = overlay.insertions;
         self.row_count = self.base.plan.row_count + overlay.inserted_total;
@@ -500,7 +500,7 @@ fn inject_notes(
     if notes.is_empty() {
         return NoteOverlay {
             insertions: Vec::new(),
-            inserted_before_base: vec![0usize; base.plan.row_count + 1],
+            inserted_before_or_at_base: vec![0usize; base.plan.row_count + 1],
             inserted_total: 0,
         };
     }
@@ -508,12 +508,11 @@ fn inject_notes(
     let base_row_contexts = plan_row_contexts(session, &base.plan);
     let note_anchors = build_note_anchors(session, notes, &base_row_contexts);
     let mut insertions = Vec::new();
-    let mut inserted_before_base = vec![0usize; base.plan.row_count + 1];
+    let mut inserted_before_or_at_base = vec![0usize; base.plan.row_count + 1];
     let mut inserted_total = 0usize;
     let note_wrap_width = inline_width.min(side_by_side_width);
 
     for base_index in 0..base.plan.row_count {
-        inserted_before_base[base_index] = inserted_total;
         for note in note_anchors
             .iter()
             .filter(|(anchor_index, _)| *anchor_index == base_index)
@@ -530,23 +529,24 @@ fn inject_notes(
                 note_id: Some(note.id),
             };
 
-            insertions.push(build_note_insertion(
+            let insertion = build_note_insertion(
                 base_index,
                 &note_rows,
                 note,
                 note_context,
                 inline_width,
                 side_by_side_width,
-            ));
-
-            inserted_total += note_rows.len();
+            );
+            inserted_total += insertion.len();
+            insertions.push(insertion);
         }
+        inserted_before_or_at_base[base_index] = inserted_total;
     }
-    inserted_before_base[base.plan.row_count] = inserted_total;
+    inserted_before_or_at_base[base.plan.row_count] = inserted_total;
 
     NoteOverlay {
         insertions,
-        inserted_before_base,
+        inserted_before_or_at_base,
         inserted_total,
     }
 }
@@ -575,14 +575,14 @@ fn build_note_insertion(
 
 fn adjust_hunk_ranges_for_insertions(
     hunk_ranges: Vec<HunkRange>,
-    inserted_before_base: &[usize],
+    inserted_before_or_at_base: &[usize],
 ) -> Vec<HunkRange> {
     hunk_ranges
         .into_iter()
         .map(|range| HunkRange {
             file_index: range.file_index,
             hunk_index: range.hunk_index,
-            start: range.start + inserted_before_base[range.start],
+            start: range.start + inserted_before_or_at_base[range.start],
         })
         .collect()
 }

@@ -160,16 +160,17 @@ impl App {
 
     pub fn clamp_cursor_row(&mut self, max_row: usize) {
         self.main_pane.cursor_row = self.main_pane.cursor_row.min(max_row);
-        if let Some(anchor) = self.main_pane.selection_anchor {
-            self.main_pane.selection_anchor = Some(anchor.min(max_row));
-        }
     }
 
     pub fn toggle_selection_anchor(&mut self) {
-        if self.main_pane.selection_anchor == Some(self.main_pane.cursor_row) {
+        let Some(context) = self.cursor_context() else {
+            return;
+        };
+
+        if self.main_pane.selection_anchor == Some(context) {
             self.main_pane.selection_anchor = None;
         } else {
-            self.main_pane.selection_anchor = Some(self.main_pane.cursor_row);
+            self.main_pane.selection_anchor = Some(context);
         }
     }
 
@@ -178,12 +179,11 @@ impl App {
     }
 
     pub fn selected_row_range(&self) -> Option<(usize, usize)> {
-        self.main_pane.selection_anchor.map(|anchor| {
-            if anchor <= self.main_pane.cursor_row {
-                (anchor, self.main_pane.cursor_row)
-            } else {
-                (self.main_pane.cursor_row, anchor)
-            }
+        let anchor = self.anchor_row()?;
+        Some(if anchor <= self.main_pane.cursor_row {
+            (anchor, self.main_pane.cursor_row)
+        } else {
+            (self.main_pane.cursor_row, anchor)
         })
     }
 
@@ -345,9 +345,37 @@ impl App {
     }
 
     fn refresh_note_overlay(&mut self) {
+        let cursor_context = self.cursor_context();
         if let Some(layout) = &mut self.layout {
             layout.refresh_notes(&self.session, &self.notes.items, &self.notes.expanded_ids);
         }
+        if let Some(context) = cursor_context {
+            self.remap_cursor_to_context(context);
+        }
+    }
+
+    fn cursor_context(&self) -> Option<RowContext> {
+        self.layout
+            .as_ref()?
+            .row_context(&self.session, self.main_pane.cursor_row)
+    }
+
+    fn anchor_row(&self) -> Option<usize> {
+        self.layout
+            .as_ref()?
+            .row_index_for_context(&self.session, self.main_pane.selection_anchor?)
+    }
+
+    fn remap_cursor_to_context(&mut self, context: RowContext) {
+        let Some(row) = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.row_index_for_context(&self.session, context))
+        else {
+            return;
+        };
+
+        self.main_pane.cursor_row = row;
     }
 }
 
@@ -474,7 +502,7 @@ mod tests {
             .row_index_for_context(&app.session, selected_context)
             .unwrap();
         app.main_pane.cursor_row = original_index;
-        app.main_pane.selection_anchor = Some(original_index);
+        app.main_pane.selection_anchor = Some(selected_context);
 
         app.layout
             .as_mut()
@@ -488,17 +516,168 @@ mod tests {
             .unwrap();
         app.main_pane.cursor_row = remapped_cursor;
 
-        let anchor = app.main_pane.selection_anchor.unwrap();
-        let anchor_context = app
-            .layout
-            .as_ref()
-            .unwrap()
-            .row_context(&app.session, anchor)
-            .unwrap();
+        let anchor_context = app.main_pane.selection_anchor.unwrap();
         assert_eq!(anchor_context.file_index, selected_context.file_index);
         assert_eq!(anchor_context.hunk_index, selected_context.hunk_index);
         assert_eq!(anchor_context.kind, selected_context.kind);
         assert_eq!(anchor_context.old_lineno, selected_context.old_lineno);
         assert_eq!(anchor_context.new_lineno, selected_context.new_lineno);
+    }
+
+    #[test]
+    fn note_insertion_preserves_selection_endpoint_identities() {
+        let mut app = app_with_hunks(3);
+        app.layout = Some(Layout::build(
+            &app.session,
+            &[],
+            &[],
+            build_options(1, 1, 0),
+        ));
+
+        let anchor_context = RowContext {
+            file_index: Some(0),
+            hunk_index: Some(1),
+            kind: RowKind::DiffLine,
+            old_lineno: Some(2),
+            new_lineno: Some(2),
+            note_id: None,
+        };
+        let cursor_context = RowContext {
+            file_index: Some(0),
+            hunk_index: Some(2),
+            kind: RowKind::DiffLine,
+            old_lineno: Some(3),
+            new_lineno: Some(3),
+            note_id: None,
+        };
+        app.main_pane.selection_anchor = Some(anchor_context);
+        app.main_pane.cursor_row = app
+            .layout
+            .as_ref()
+            .unwrap()
+            .row_index_for_context(&app.session, cursor_context)
+            .unwrap();
+
+        app.add_note(
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            "note before diff lines".to_string(),
+        );
+
+        let (start, end) = app.selected_row_range().unwrap();
+        let layout = app.layout.as_ref().unwrap();
+        assert_eq!(
+            layout.row_context(&app.session, start).unwrap(),
+            anchor_context
+        );
+        assert_eq!(
+            layout.row_context(&app.session, end).unwrap(),
+            cursor_context
+        );
+
+        match app.current_note_target().unwrap() {
+            NoteTarget::Range {
+                start_old_lineno,
+                start_new_lineno,
+                end_old_lineno,
+                end_new_lineno,
+                ..
+            } => {
+                assert_eq!(start_old_lineno, Some(2));
+                assert_eq!(start_new_lineno, Some(2));
+                assert_eq!(end_old_lineno, Some(3));
+                assert_eq!(end_new_lineno, Some(3));
+            }
+            other => panic!("expected range note target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn note_expansion_preserves_cursor_identity_after_cache_refresh() {
+        let mut app = app_with_hunks(3);
+        app.layout = Some(Layout::build(
+            &app.session,
+            &[],
+            &[],
+            build_options(2, 1, 0),
+        ));
+
+        let cursor_context = RowContext {
+            file_index: Some(0),
+            hunk_index: Some(2),
+            kind: RowKind::DiffLine,
+            old_lineno: Some(3),
+            new_lineno: Some(3),
+            note_id: None,
+        };
+        app.main_pane.cursor_row = app
+            .layout
+            .as_ref()
+            .unwrap()
+            .row_index_for_context(&app.session, cursor_context)
+            .unwrap();
+        app.add_note(
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            "this note is intentionally long enough to wrap across several rendered rows before the selected diff line and change height when expanded".to_string(),
+        );
+
+        app.notes.expanded_ids.push(1);
+        app.refresh_note_overlay();
+
+        assert_eq!(
+            app.layout
+                .as_ref()
+                .unwrap()
+                .row_context(&app.session, app.main_pane.cursor_row)
+                .unwrap(),
+            cursor_context
+        );
+    }
+
+    #[test]
+    fn note_before_hunk_header_does_not_move_hunk_range_to_the_note() {
+        let mut app = app_with_hunks(3);
+        app.layout = Some(Layout::build(
+            &app.session,
+            &[],
+            &[],
+            build_options(1, 1, 0),
+        ));
+
+        app.add_note(
+            NoteTarget::Hunk {
+                file_path: "test.rs".to_string(),
+                hunk_header: "@@ hunk 1 @@".to_string(),
+            },
+            "hunk note".to_string(),
+        );
+
+        let header_context = RowContext {
+            file_index: Some(0),
+            hunk_index: Some(1),
+            kind: RowKind::HunkHeader,
+            old_lineno: None,
+            new_lineno: None,
+            note_id: None,
+        };
+        let layout = app.layout.as_ref().unwrap();
+        let header_row = layout
+            .row_index_for_context(&app.session, header_context)
+            .unwrap();
+        let range_start = layout
+            .hunk_ranges
+            .iter()
+            .find(|range| range.file_index == 0 && range.hunk_index == 1)
+            .unwrap()
+            .start;
+
+        assert_eq!(range_start, header_row);
+        assert_eq!(
+            layout.row_context(&app.session, range_start).unwrap(),
+            header_context
+        );
     }
 }
