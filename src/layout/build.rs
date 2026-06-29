@@ -9,8 +9,8 @@ use crate::layout::lines::{
     side_by_side_hunk_header_line,
 };
 use crate::layout::model::{
-    BaseLayout, CachedRows, FileNode, HunkNode, HunkRange, Layout, LayoutTree, NodeStatus,
-    NoteInsertion, RenderRow, RowContext, RowKind,
+    BaseLayout, CachedRows, FileNode, HunkNode, HunkRange, Layout, LayoutTargetState, LayoutTree,
+    NodeStatus, NoteInsertion, RenderRow, RowContext, RowKind,
 };
 use crate::layout::notes::{
     build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
@@ -45,7 +45,6 @@ impl Layout {
     ///     selected_hunk: 2,
     ///     viewport_rows: 40,
     ///     overscan_rows: 80,
-    ///     nav_direction: None,
     /// };
     /// let layout = Layout::build(
     ///     &app.session,
@@ -59,7 +58,7 @@ impl Layout {
     ///         target,
     ///     },
     /// );
-    /// // -> Layout { inline_width: 80, side_by_side_width: 120, target_file: 0, target_hunk: 2, ... }
+    /// // -> Layout { inline_width: 80, side_by_side_width: 120, ... }
     /// ```
     pub fn build(
         session: &DiffSession,
@@ -81,13 +80,14 @@ impl Layout {
         let mut layout = Self {
             inline_width: options.widths.inline,
             side_by_side_width: options.widths.side_by_side,
-            target_generation: 0,
-            target_generation_ready: false,
-            target_file: options.target.selected_file,
-            target_hunk: options.target.selected_hunk,
-            target_viewport_rows: options.target.viewport_rows,
-            target_overscan_rows: options.target.overscan_rows,
-            target_nav_direction: options.target.nav_direction,
+            target_state: LayoutTargetState {
+                generation: 0,
+                generation_ready: false,
+                file: options.target.selected_file,
+                hunk: options.target.selected_hunk,
+                viewport_rows: options.target.viewport_rows,
+                overscan_rows: options.target.overscan_rows,
+            },
             base,
             hunk_ranges: Vec::new(),
             note_insertions: Vec::new(),
@@ -118,7 +118,6 @@ impl Layout {
     ///         selected_hunk: 3,
     ///         viewport_rows: 40,
     ///         overscan_rows: 80,
-    ///         nav_direction: Some(NavDirection::Down),
     ///     },
     /// );
     /// // -> true
@@ -131,18 +130,18 @@ impl Layout {
         expanded_note_ids: &[u64],
         target: HunkWindowTarget,
     ) -> bool {
-        if !self.target_generation_ready || self.target_window_changed(target) {
-            self.target_generation = worker.next_generation();
-            self.target_generation_ready = true;
+        if !self.target_state.generation_ready || self.target_window_changed(target) {
+            self.target_state.generation = worker.next_generation();
+            self.target_state.generation_ready = true;
             self.store_target_window(target);
             reset_loading_hunks(&mut self.base.tree);
-            worker.set_generation(self.target_generation);
+            worker.set_generation(self.target_state.generation);
         }
         let expand_start = Instant::now();
         let window = apply_loaded_hunk_window(
             &mut self.base.tree,
             worker,
-            self.target_generation,
+            self.target_state.generation,
             session,
             LayoutWidths {
                 inline: self.inline_width,
@@ -191,19 +190,17 @@ impl Layout {
     }
 
     fn target_window_changed(&self, target: HunkWindowTarget) -> bool {
-        self.target_file != target.selected_file
-            || self.target_hunk != target.selected_hunk
-            || self.target_viewport_rows != target.viewport_rows
-            || self.target_overscan_rows != target.overscan_rows
-            || self.target_nav_direction != target.nav_direction
+        self.target_state.file != target.selected_file
+            || self.target_state.hunk != target.selected_hunk
+            || self.target_state.viewport_rows != target.viewport_rows
+            || self.target_state.overscan_rows != target.overscan_rows
     }
 
     fn store_target_window(&mut self, target: HunkWindowTarget) {
-        self.target_file = target.selected_file;
-        self.target_hunk = target.selected_hunk;
-        self.target_viewport_rows = target.viewport_rows;
-        self.target_overscan_rows = target.overscan_rows;
-        self.target_nav_direction = target.nav_direction;
+        self.target_state.file = target.selected_file;
+        self.target_state.hunk = target.selected_hunk;
+        self.target_state.viewport_rows = target.viewport_rows;
+        self.target_state.overscan_rows = target.overscan_rows;
     }
 
     /// Synchronously builds the selected hunk if its rows are not loaded.
@@ -388,25 +385,11 @@ fn build_file_node(
         })
         .collect();
 
-    let trailing_spacer = CachedRows {
-        inline_rows: vec![RenderRow::Static(Line::default())],
-        side_by_side_rows: vec![RenderRow::Static(Line::default())],
-        row_contexts: vec![RowContext {
-            file_index: Some(file_index),
-            hunk_index: None,
-            kind: RowKind::Spacer,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        }],
-    };
-
     FileNode {
         file_index,
         status: NodeStatus::Ready,
         header,
         hunks,
-        trailing_spacer,
     }
 }
 

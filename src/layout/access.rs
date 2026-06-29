@@ -37,7 +37,7 @@ impl Layout {
     ///
     /// ```rust,ignore
     /// if let Some(context) = layout.row_context(&session, 0) {
-    ///     app.main_pane.cursor_target = Some(context);
+    ///     app.main_pane.selected_file = context.file_index.unwrap_or(0);
     /// }
     /// // -> Some(RowContext {
     /// //      file_index: Some(0),

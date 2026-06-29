@@ -1,7 +1,5 @@
 use ratatui::text::Line;
 
-use crate::state::NavDirection;
-
 #[derive(Clone, Debug)]
 pub struct HunkRange {
     pub file_index: usize,
@@ -51,9 +49,6 @@ pub enum RowId {
         file_index: usize,
         hunk_index: usize,
     },
-    FileSpacer {
-        file_index: usize,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,8 +66,8 @@ pub struct PlannedFile {
     pub file_index: usize,
     /// Base row index of the file separator.
     pub start: usize,
-    /// Base row index of the blank row after the file's hunks.
-    pub trailing_spacer: usize,
+    /// One past the last base row belonging to this file.
+    pub end: usize,
     pub hunks: Vec<PlannedHunk>,
 }
 
@@ -89,17 +84,21 @@ pub struct LayoutPlan {
 pub struct Layout {
     pub inline_width: usize,
     pub side_by_side_width: usize,
-    pub target_generation: u64,
-    pub target_generation_ready: bool,
-    pub target_file: usize,
-    pub target_hunk: usize,
-    pub target_viewport_rows: usize,
-    pub target_overscan_rows: usize,
-    pub target_nav_direction: Option<NavDirection>,
+    pub(super) target_state: LayoutTargetState,
     pub base: BaseLayout,
     pub hunk_ranges: Vec<HunkRange>,
     pub note_insertions: Vec<NoteInsertion>,
     pub row_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct LayoutTargetState {
+    pub generation: u64,
+    pub generation_ready: bool,
+    pub file: usize,
+    pub hunk: usize,
+    pub viewport_rows: usize,
+    pub overscan_rows: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -123,7 +122,6 @@ pub struct FileNode {
     pub status: NodeStatus,
     pub header: CachedRows,
     pub hunks: Vec<HunkNode>,
-    pub trailing_spacer: CachedRows,
 }
 
 #[derive(Clone, Debug)]

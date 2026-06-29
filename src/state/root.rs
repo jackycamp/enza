@@ -4,8 +4,8 @@ use crate::diff::{DiffFile, DiffSession};
 use crate::layout::{Layout, LayoutWorker, RowContext};
 use crate::note::{Note, NoteTarget};
 use crate::state::{
-    DiffMode, FocusPane, GlobalState, MainPaneState, NavDirection, NoteInputResult, NoteState,
-    SidebarEntry, SidebarState, note_target_for_range, note_target_for_row,
+    DiffMode, FocusPane, GlobalState, MainPaneState, NoteInputResult, NoteState, SidebarEntry,
+    SidebarState, note_target_for_range, note_target_for_row,
 };
 
 #[derive(Debug)]
@@ -31,13 +31,11 @@ impl App {
                 mode: DiffMode::SideBySide,
                 focus: FocusPane::Main,
                 debug_pane_open: false,
-                nav_direction: None,
             },
             main_pane: MainPaneState {
                 selected_file: 0,
                 selected_hunk: 0,
                 cursor_row: 0,
-                cursor_target: None,
                 selection_anchor: None,
                 scroll: 0,
             },
@@ -115,32 +113,10 @@ impl App {
         if let Some(file_index) = self.sidebar.activate_cursor(&self.session.files) {
             self.main_pane.selected_file = file_index;
             self.main_pane.selected_hunk = 0;
-            self.main_pane.cursor_target = Some(RowContext {
-                file_index: Some(file_index),
-                hunk_index: self
-                    .session
-                    .files
-                    .get(file_index)
-                    .and_then(|file| (!file.hunks.is_empty()).then_some(0)),
-                kind: if self
-                    .session
-                    .files
-                    .get(file_index)
-                    .is_some_and(|file| !file.hunks.is_empty())
-                {
-                    crate::layout::RowKind::HunkHeader
-                } else {
-                    crate::layout::RowKind::FileHeader
-                },
-                old_lineno: None,
-                new_lineno: None,
-                note_id: None,
-            });
         }
     }
 
     pub fn next_hunk(&mut self) {
-        self.global.nav_direction = Some(NavDirection::Down);
         let Some(current_file) = self.current_file() else {
             return;
         };
@@ -150,18 +126,9 @@ impl App {
             self.main_pane.selected_file += 1;
             self.main_pane.selected_hunk = 0;
         }
-        self.main_pane.cursor_target = Some(RowContext {
-            file_index: Some(self.main_pane.selected_file),
-            hunk_index: Some(self.main_pane.selected_hunk),
-            kind: crate::layout::RowKind::HunkHeader,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        });
     }
 
     pub fn previous_hunk(&mut self) {
-        self.global.nav_direction = Some(NavDirection::Up);
         if self.main_pane.selected_hunk > 0 {
             self.main_pane.selected_hunk -= 1;
         } else if self.main_pane.selected_file > 0 {
@@ -171,14 +138,6 @@ impl App {
                 .map(|file| file.hunks.len().saturating_sub(1))
                 .unwrap_or(0);
         }
-        self.main_pane.cursor_target = Some(RowContext {
-            file_index: Some(self.main_pane.selected_file),
-            hunk_index: Some(self.main_pane.selected_hunk),
-            kind: crate::layout::RowKind::HunkHeader,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        });
     }
 
     pub fn current_file(&self) -> Option<&DiffFile> {
@@ -186,25 +145,15 @@ impl App {
     }
 
     pub fn move_cursor_down(&mut self, amount: usize, max_row: usize) {
-        self.global.nav_direction = Some(NavDirection::Down);
         for _ in 0..amount {
-            if self.try_advance_to_next_hunk() {
-                continue;
-            }
             self.main_pane.cursor_row = (self.main_pane.cursor_row + 1).min(max_row);
-            self.capture_cursor_target();
             self.sync_selection_to_cursor();
         }
     }
 
     pub fn move_cursor_up(&mut self, amount: usize) {
-        self.global.nav_direction = Some(NavDirection::Up);
         for _ in 0..amount {
-            if self.try_retreat_to_previous_hunk() {
-                continue;
-            }
             self.main_pane.cursor_row = self.main_pane.cursor_row.saturating_sub(1);
-            self.capture_cursor_target();
             self.sync_selection_to_cursor();
         }
     }
@@ -214,7 +163,6 @@ impl App {
         if let Some(anchor) = self.main_pane.selection_anchor {
             self.main_pane.selection_anchor = Some(anchor.min(max_row));
         }
-        self.capture_cursor_target();
     }
 
     pub fn toggle_selection_anchor(&mut self) {
@@ -244,18 +192,15 @@ impl App {
             return;
         };
 
-        let Some(
-            context @ RowContext {
-                file_index: Some(file_index),
-                hunk_index,
-                ..
-            },
-        ) = layout.row_context(&self.session, self.main_pane.cursor_row)
+        let Some(RowContext {
+            file_index: Some(file_index),
+            hunk_index,
+            ..
+        }) = layout.row_context(&self.session, self.main_pane.cursor_row)
         else {
             return;
         };
 
-        self.main_pane.cursor_target = Some(context);
         self.main_pane.selected_file = file_index;
         if let Some(hunk_index) = hunk_index {
             self.main_pane.selected_hunk = hunk_index;
@@ -404,173 +349,6 @@ impl App {
             layout.refresh_notes(&self.session, &self.notes.items, &self.notes.expanded_ids);
         }
     }
-
-    fn capture_cursor_target(&mut self) {
-        let Some(layout) = &self.layout else {
-            return;
-        };
-        self.main_pane.cursor_target = layout.row_context(&self.session, self.main_pane.cursor_row);
-    }
-
-    fn try_advance_to_next_hunk(&mut self) -> bool {
-        let Some(layout) = &self.layout else {
-            return false;
-        };
-        let Some(current) = layout.row_context(&self.session, self.main_pane.cursor_row) else {
-            return false;
-        };
-        let Some(next) =
-            layout.row_context(&self.session, self.main_pane.cursor_row.saturating_add(1))
-        else {
-            return false;
-        };
-
-        if current.hunk_index == next.hunk_index || next.kind != crate::layout::RowKind::Spacer {
-            return false;
-        }
-
-        let Some((file_index, hunk_index)) = next_hunk_indices(
-            &self.session,
-            self.main_pane.selected_file,
-            self.main_pane.selected_hunk,
-        ) else {
-            return false;
-        };
-
-        self.main_pane.selected_file = file_index;
-        self.main_pane.selected_hunk = hunk_index;
-        let target = RowContext {
-            file_index: Some(file_index),
-            hunk_index: Some(hunk_index),
-            kind: crate::layout::RowKind::HunkHeader,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        };
-        self.main_pane.cursor_target = Some(target);
-        if let Some(index) = row_index_for_context(layout, &self.session, target) {
-            self.main_pane.cursor_row = index;
-        }
-        true
-    }
-
-    fn try_retreat_to_previous_hunk(&mut self) -> bool {
-        let Some(layout) = &self.layout else {
-            return false;
-        };
-        let Some(current) = layout.row_context(&self.session, self.main_pane.cursor_row) else {
-            return false;
-        };
-        if self.main_pane.cursor_row == 0 {
-            return false;
-        }
-        let Some(previous) = layout.row_context(&self.session, self.main_pane.cursor_row - 1)
-        else {
-            return false;
-        };
-
-        if current.kind != crate::layout::RowKind::HunkHeader
-            || previous.kind != crate::layout::RowKind::Spacer
-        {
-            return false;
-        }
-
-        let Some((file_index, hunk_index)) = previous_hunk_indices(
-            &self.session,
-            self.main_pane.selected_file,
-            self.main_pane.selected_hunk,
-        ) else {
-            return false;
-        };
-        let Some(target) = last_meaningful_row_context(&self.session, file_index, hunk_index)
-        else {
-            return false;
-        };
-
-        self.main_pane.selected_file = file_index;
-        self.main_pane.selected_hunk = hunk_index;
-        self.main_pane.cursor_target = Some(target);
-        if let Some(index) = row_index_for_context(layout, &self.session, target) {
-            self.main_pane.cursor_row = index;
-        }
-        true
-    }
-}
-
-fn next_hunk_indices(
-    session: &DiffSession,
-    selected_file: usize,
-    selected_hunk: usize,
-) -> Option<(usize, usize)> {
-    for (file_index, file) in session.files.iter().enumerate().skip(selected_file) {
-        let start_hunk = if file_index == selected_file {
-            selected_hunk + 1
-        } else {
-            0
-        };
-        if start_hunk < file.hunks.len() {
-            return Some((file_index, start_hunk));
-        }
-    }
-    None
-}
-
-fn previous_hunk_indices(
-    session: &DiffSession,
-    selected_file: usize,
-    selected_hunk: usize,
-) -> Option<(usize, usize)> {
-    let mut file_index = selected_file;
-    loop {
-        let file = session.files.get(file_index)?;
-        let candidate = if file_index == selected_file {
-            selected_hunk.checked_sub(1)
-        } else {
-            file.hunks.len().checked_sub(1)
-        };
-        if let Some(hunk_index) = candidate {
-            return Some((file_index, hunk_index));
-        }
-        if file_index == 0 {
-            return None;
-        }
-        file_index -= 1;
-    }
-}
-
-fn last_meaningful_row_context(
-    session: &DiffSession,
-    file_index: usize,
-    hunk_index: usize,
-) -> Option<RowContext> {
-    let hunk = session.files.get(file_index)?.hunks.get(hunk_index)?;
-    let last_line = hunk.lines.last();
-    Some(match last_line {
-        Some(line) => RowContext {
-            file_index: Some(file_index),
-            hunk_index: Some(hunk_index),
-            kind: crate::layout::RowKind::DiffLine,
-            old_lineno: line.old_lineno(),
-            new_lineno: line.new_lineno(),
-            note_id: None,
-        },
-        None => RowContext {
-            file_index: Some(file_index),
-            hunk_index: Some(hunk_index),
-            kind: crate::layout::RowKind::HunkHeader,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        },
-    })
-}
-
-fn row_index_for_context(
-    layout: &Layout,
-    session: &DiffSession,
-    target: RowContext,
-) -> Option<usize> {
-    layout.row_index_for_context(session, target)
 }
 
 #[cfg(test)]
@@ -611,14 +389,13 @@ mod tests {
         selected_hunk: usize,
         viewport_rows: usize,
         overscan_rows: usize,
-        nav_direction: Option<NavDirection>,
     ) -> LayoutBuildOptions {
         LayoutBuildOptions {
             widths: LayoutWidths {
                 inline: 80,
                 side_by_side: 80,
             },
-            target: window_target(selected_hunk, viewport_rows, overscan_rows, nav_direction),
+            target: window_target(selected_hunk, viewport_rows, overscan_rows),
         }
     }
 
@@ -626,23 +403,20 @@ mod tests {
         selected_hunk: usize,
         viewport_rows: usize,
         overscan_rows: usize,
-        nav_direction: Option<NavDirection>,
     ) -> HunkWindowTarget {
         HunkWindowTarget {
             selected_file: 0,
             selected_hunk,
             viewport_rows,
             overscan_rows,
-            nav_direction,
         }
     }
 
     #[test]
     fn navigation_across_an_unloaded_hunk_preserves_the_target() {
         let mut app = app_with_hunks(4);
-        let mut layout = Layout::build(&app.session, &[], &[], build_options(0, 1, 0, None));
+        let layout = Layout::build(&app.session, &[], &[], build_options(0, 1, 0));
 
-        layout.target_hunk = 1;
         let boundary = row_for(&app.session, &layout, 1, RowKind::Spacer);
         app.layout = Some(layout);
         app.main_pane.selected_hunk = 1;
@@ -657,14 +431,22 @@ mod tests {
             &app.session,
             &[],
             &[],
-            window_target(app.main_pane.selected_hunk, 1, 0, app.global.nav_direction),
+            window_target(app.main_pane.selected_hunk, 1, 0),
         );
         let new_max_row = app.layout.as_ref().unwrap().row_count - 1;
         app.clamp_cursor_row(new_max_row);
         app.sync_selection_to_cursor();
 
         assert_eq!(app.main_pane.selected_hunk, 2);
-        assert_eq!(app.main_pane.cursor_target.unwrap().hunk_index, Some(2));
+        assert_eq!(
+            app.layout
+                .as_ref()
+                .unwrap()
+                .row_context(&app.session, app.main_pane.cursor_row)
+                .unwrap()
+                .hunk_index,
+            Some(2)
+        );
     }
 
     #[test]
@@ -674,7 +456,7 @@ mod tests {
             &app.session,
             &[],
             &[],
-            build_options(1, 1, 0, None),
+            build_options(1, 1, 0),
         ));
 
         let selected_context = RowContext {
@@ -685,20 +467,25 @@ mod tests {
             new_lineno: Some(2),
             note_id: None,
         };
-        let original_index =
-            row_index_for_context(app.layout.as_ref().unwrap(), &app.session, selected_context)
-                .unwrap();
+        let original_index = app
+            .layout
+            .as_ref()
+            .unwrap()
+            .row_index_for_context(&app.session, selected_context)
+            .unwrap();
         app.main_pane.cursor_row = original_index;
-        app.main_pane.cursor_target = Some(selected_context);
         app.main_pane.selection_anchor = Some(original_index);
 
         app.layout
             .as_mut()
             .unwrap()
             .ensure_selected_hunk_ready_sync(&app.session, &[], &[], 0, 0);
-        let remapped_cursor =
-            row_index_for_context(app.layout.as_ref().unwrap(), &app.session, selected_context)
-                .unwrap();
+        let remapped_cursor = app
+            .layout
+            .as_ref()
+            .unwrap()
+            .row_index_for_context(&app.session, selected_context)
+            .unwrap();
         app.main_pane.cursor_row = remapped_cursor;
 
         let anchor = app.main_pane.selection_anchor.unwrap();

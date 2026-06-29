@@ -11,7 +11,6 @@ use crate::diff::DiffSession;
 use crate::layout::build::build_hunk_node_for_worker;
 use crate::layout::model::{CachedRows, LayoutTree, NodeStatus};
 use crate::layout::worker::{HunkBuildKey, HunkBuildWindowRequest, LayoutWorker};
-use crate::state::NavDirection;
 
 /// Render widths used when building hunk rows.
 ///
@@ -40,14 +39,12 @@ pub(crate) struct LayoutWidths {
 ///     selected_hunk: 2,
 ///     viewport_rows: 40,
 ///     overscan_rows: 80,
-///     nav_direction: Some(NavDirection::Down),
 /// };
 /// // -> HunkWindowTarget {
 /// //      selected_file: 0,
 /// //      selected_hunk: 2,
 /// //      viewport_rows: 40,
 /// //      overscan_rows: 80,
-/// //      nav_direction: Some(NavDirection::Down),
 /// //    }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,7 +53,6 @@ pub(crate) struct HunkWindowTarget {
     pub selected_hunk: usize,
     pub viewport_rows: usize,
     pub overscan_rows: usize,
-    pub nav_direction: Option<NavDirection>,
 }
 
 /// Inputs required to build a full layout from scratch.
@@ -74,7 +70,6 @@ pub(crate) struct HunkWindowTarget {
 ///         selected_hunk: 2,
 ///         viewport_rows: 40,
 ///         overscan_rows: 80,
-///         nav_direction: None,
 ///     },
 /// };
 /// // -> LayoutBuildOptions {
@@ -84,7 +79,6 @@ pub(crate) struct HunkWindowTarget {
 /// //          selected_hunk: 2,
 /// //          viewport_rows: 40,
 /// //          overscan_rows: 80,
-/// //          nav_direction: None,
 /// //      },
 /// //    }
 /// ```
@@ -378,39 +372,21 @@ fn plan_loaded_hunks(session: &DiffSession, target: HunkWindowTarget) -> LoadedH
 
     while before_rows < before_target || overscan_after_rows < overscan_after_target {
         let mut progressed = false;
-        let prefer_up = matches!(target.nav_direction, Some(NavDirection::Up));
 
-        if prefer_up {
-            progressed |= try_extend_up(
-                &all_hunks,
-                &mut plan,
-                &mut before_rows,
-                before_target,
-                &mut previous_index,
-            );
-            progressed |= try_extend_down(
-                &all_hunks,
-                &mut plan,
-                &mut overscan_after_rows,
-                overscan_after_target,
-                &mut next_index,
-            );
-        } else {
-            progressed |= try_extend_down(
-                &all_hunks,
-                &mut plan,
-                &mut overscan_after_rows,
-                overscan_after_target,
-                &mut next_index,
-            );
-            progressed |= try_extend_up(
-                &all_hunks,
-                &mut plan,
-                &mut before_rows,
-                before_target,
-                &mut previous_index,
-            );
-        }
+        progressed |= try_extend_down(
+            &all_hunks,
+            &mut plan,
+            &mut overscan_after_rows,
+            overscan_after_target,
+            &mut next_index,
+        );
+        progressed |= try_extend_up(
+            &all_hunks,
+            &mut plan,
+            &mut before_rows,
+            before_target,
+            &mut previous_index,
+        );
 
         if !progressed {
             break;
@@ -541,7 +517,6 @@ mod tests {
             selected_hunk: 0,
             viewport_rows: 0,
             overscan_rows: 0,
-            nav_direction: None,
         }
     }
 

@@ -29,7 +29,6 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         selected_hunk: app.main_pane.selected_hunk,
         viewport_rows,
         overscan_rows,
-        nav_direction: app.global.nav_direction,
     };
     let needs_rebuild = app.layout.as_ref().is_none_or(|layout| {
         layout.inline_width != inline_width || layout.side_by_side_width != side_width
@@ -38,11 +37,10 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         .main_pane
         .cursor_row
         .saturating_sub(app.main_pane.scroll as usize);
-    let previous_cursor = app.main_pane.cursor_target.or_else(|| {
-        app.layout
-            .as_ref()
-            .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row))
-    });
+    let previous_cursor = app
+        .layout
+        .as_ref()
+        .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row));
 
     if needs_rebuild {
         app.layout = Some(DiffLayout::build(
@@ -66,18 +64,14 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
     {
         if let Some(index) = row_index_for_context(layout, &app.session, context) {
             app.main_pane.cursor_row = index;
-            app.main_pane.cursor_target = Some(context);
             app.main_pane.scroll = index.saturating_sub(previous_visual_offset) as u16;
         } else if let Some(range) = layout.hunk_ranges.iter().find(|range| {
             range.file_index == app.main_pane.selected_file
                 && range.hunk_index == app.main_pane.selected_hunk
         }) {
             app.main_pane.cursor_row = range.start;
-            app.main_pane.cursor_target = layout.row_context(&app.session, range.start);
             app.main_pane.selection_anchor = None;
             app.main_pane.scroll = range.start.saturating_sub(previous_visual_offset) as u16;
-        } else {
-            app.main_pane.cursor_target = Some(context);
         }
     }
 }
@@ -514,14 +508,9 @@ fn debug_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             "Base Rows {}",
             layout.base.plan.row_count
         )));
-        let direction = match app.global.nav_direction {
-            Some(crate::state::NavDirection::Up) => "up",
-            Some(crate::state::NavDirection::Down) => "down",
-            None => "-",
-        };
         lines.push(Line::from(format!(
-            "Jump Target {}:{} {}",
-            layout.target_file, layout.target_hunk, direction
+            "Target Hunk {}:{}",
+            app.main_pane.selected_file, app.main_pane.selected_hunk
         )));
     }
 

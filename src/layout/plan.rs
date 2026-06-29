@@ -44,13 +44,10 @@ pub(super) fn build_layout_plan(session: &DiffSession) -> LayoutPlan {
             row_count += hunk.lines.len() + 2;
         }
 
-        let trailing_spacer = row_count;
-        row_count += 1;
-
         files.push(PlannedFile {
             file_index,
             start: file_start,
-            trailing_spacer,
+            end: row_count,
             hunks,
         });
     }
@@ -127,14 +124,6 @@ pub(super) fn row_context_for_plan_row(
         } => Some(RowContext {
             file_index: Some(file_index),
             hunk_index: Some(hunk_index),
-            kind: RowKind::Spacer,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        }),
-        RowId::FileSpacer { file_index } => Some(RowContext {
-            file_index: Some(file_index),
-            hunk_index: None,
             kind: RowKind::Spacer,
             old_lineno: None,
             new_lineno: None,
@@ -232,11 +221,6 @@ pub(super) fn plan_row_to_render_rows(
                 .and_then(|hunk| cached_row_pair(&hunk.rows, line_count + 1))
                 .unwrap_or_else(blank_row_pair)
         }
-        RowId::FileSpacer { file_index } => tree
-            .files
-            .get(file_index)
-            .and_then(|file| cached_row_pair(&file.trailing_spacer, 0))
-            .unwrap_or_else(blank_row_pair),
     }
 }
 
@@ -293,7 +277,7 @@ pub(super) fn plan_row_index_for_context(
                 let hunk = hunk_for_index(file, hunk_index)?;
                 Some(hunk.start + hunk.line_count + 1)
             } else {
-                Some(file.trailing_spacer)
+                None
             }
         }
         RowKind::Note => None,
@@ -313,12 +297,6 @@ fn row_id_for_plan_row(plan: &LayoutPlan, row_index: usize) -> Option<RowId> {
             file_index: file.file_index,
         });
     }
-    if row_index == file.trailing_spacer {
-        return Some(RowId::FileSpacer {
-            file_index: file.file_index,
-        });
-    }
-
     let hunk = hunk_for_row(file, row_index)?;
     let offset = row_index.saturating_sub(hunk.start);
     if offset == 0 {
@@ -345,7 +323,7 @@ fn row_id_for_plan_row(plan: &LayoutPlan, row_index: usize) -> Option<RowId> {
 fn file_for_row(plan: &LayoutPlan, row_index: usize) -> Option<&PlannedFile> {
     let index = plan.files.partition_point(|file| file.start <= row_index);
     let file = plan.files.get(index.checked_sub(1)?)?;
-    (row_index <= file.trailing_spacer).then_some(file)
+    (row_index < file.end).then_some(file)
 }
 
 /// Finds a planned file by diff file index.

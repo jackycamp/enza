@@ -5,7 +5,7 @@ mod root;
 mod selection;
 mod sidebar;
 
-pub use global::{DiffMode, FocusPane, GlobalState, NavDirection};
+pub use global::{DiffMode, FocusPane, GlobalState};
 pub use main_pane::MainPaneState;
 pub use notes::{NoteInputResult, NoteState};
 pub use root::App;

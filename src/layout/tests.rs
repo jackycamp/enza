@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
 use crate::layout::plan::plan_row_contexts;
-use crate::layout::{HunkWindowTarget, Layout, LayoutBuildOptions, LayoutWidths, LayoutWorker};
+use crate::layout::{
+    HunkWindowTarget, Layout, LayoutBuildOptions, LayoutWidths, LayoutWorker, RowKind,
+};
 
 use super::model::NodeStatus;
 
@@ -65,6 +67,20 @@ fn moving_the_window_evicts_hunks_outside_it() {
     assert_eq!(hunk_starts(&layout), original_hunk_starts);
 }
 
+#[test]
+fn last_row_belongs_to_the_last_hunk_not_a_file_spacer() {
+    let session = session_with_hunks(4);
+    let layout = Layout::build(&session, &[], &[], build_options(3, 1, 0));
+
+    let last_context = layout
+        .row_context(&session, layout.row_count - 1)
+        .expect("last row should have context");
+
+    assert_eq!(last_context.file_index, Some(0));
+    assert_eq!(last_context.hunk_index, Some(3));
+    assert_eq!(last_context.kind, RowKind::Spacer);
+}
+
 fn build_options(
     selected_hunk: usize,
     viewport_rows: usize,
@@ -89,7 +105,6 @@ fn window_target(
         selected_hunk,
         viewport_rows,
         overscan_rows,
-        nav_direction: None,
     }
 }
 
