@@ -264,7 +264,7 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let lines = layout.materialize_rows(
+    let lines = layout.render_visible_rows(
         &app.session,
         true,
         &row_view_state(app, app.global.focus == FocusPane::Main),
@@ -290,7 +290,7 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let lines = layout.materialize_rows(
+    let lines = layout.render_visible_rows(
         &app.session,
         false,
         &row_view_state(app, app.global.focus == FocusPane::Main),

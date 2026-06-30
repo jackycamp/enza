@@ -8,7 +8,7 @@ use crate::layout::{
     HunkWindowTarget, Layout, LayoutBuildOptions, LayoutWidths, LayoutWorker, RowKind,
 };
 
-use super::model::NodeStatus;
+use super::layout_tree::NodeStatus;
 
 #[test]
 fn viewport_growth_after_a_resize_can_load_more_hunks() {

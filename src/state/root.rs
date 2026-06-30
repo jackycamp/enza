@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn materializing_rows_preserves_both_selection_endpoints() {
+    fn rendering_visible_rows_preserves_both_selection_endpoints() {
         let mut app = app_with_hunks(3);
         app.layout = Some(Layout::build(
             &app.session,

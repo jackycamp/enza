@@ -8,11 +8,13 @@
 use ratatui::text::Line;
 
 use crate::diff::DiffSession;
-use crate::layout::lines::{hunk_header_line, hunk_header_row, side_by_side_hunk_header_line};
-use crate::layout::model::{
-    CachedRows, HunkRange, LayoutPlan, LayoutTree, NodeStatus, PlannedFile, PlannedHunk, RenderRow,
-    RowContext, RowId, RowKind,
+use crate::layout::layout_tree::{CachedRows, LayoutTree, NodeStatus};
+use crate::layout::lines::{hunk_header_line, side_by_side_hunk_header_line};
+use crate::layout::primitives::{
+    HunkRange, LayoutPlan, PlannedFile, PlannedHunk, RenderRow, RowContext, RowId, RowKind,
 };
+
+// FIXME: At this point why isn't build_layout_plan just LayoutPlan::new ?
 
 /// Builds base row metadata from the parsed diff.
 ///
@@ -70,33 +72,12 @@ pub(super) fn row_context_for_plan_row(
     row_index: usize,
 ) -> Option<RowContext> {
     match row_id_for_plan_row(plan, row_index)? {
-        RowId::FileSeparator { file_index } => Some(RowContext {
-            file_index: Some(file_index),
-            hunk_index: None,
-            kind: RowKind::Separator,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        }),
-        RowId::FileHeader { file_index } => Some(RowContext {
-            file_index: Some(file_index),
-            hunk_index: None,
-            kind: RowKind::FileHeader,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        }),
+        RowId::FileSeparator { file_index } => Some(RowContext::separator(file_index)),
+        RowId::FileHeader { file_index } => Some(RowContext::file_header(file_index)),
         RowId::HunkHeader {
             file_index,
             hunk_index,
-        } => Some(RowContext {
-            file_index: Some(file_index),
-            hunk_index: Some(hunk_index),
-            kind: RowKind::HunkHeader,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        }),
+        } => Some(RowContext::hunk_header(file_index, hunk_index)),
         RowId::DiffLine {
             file_index,
             hunk_index,
@@ -109,26 +90,17 @@ pub(super) fn row_context_for_plan_row(
                 .get(hunk_index)?
                 .lines
                 .get(line_index)?;
-            Some(RowContext {
-                file_index: Some(file_index),
-                hunk_index: Some(hunk_index),
-                kind: RowKind::DiffLine,
-                old_lineno: line.old_lineno(),
-                new_lineno: line.new_lineno(),
-                note_id: None,
-            })
+            Some(RowContext::diff_line(
+                file_index,
+                hunk_index,
+                line.old_lineno(),
+                line.new_lineno(),
+            ))
         }
         RowId::HunkSpacer {
             file_index,
             hunk_index,
-        } => Some(RowContext {
-            file_index: Some(file_index),
-            hunk_index: Some(hunk_index),
-            kind: RowKind::Spacer,
-            old_lineno: None,
-            new_lineno: None,
-            note_id: None,
-        }),
+        } => Some(RowContext::spacer(file_index, hunk_index)),
     }
 }
 
@@ -178,13 +150,13 @@ pub(super) fn plan_row_to_render_rows(
                     return blank_row_pair();
                 };
                 (
-                    hunk_header_row(
+                    RenderRow::hunk_header(
                         file_index,
                         hunk_index,
                         hunk_header_line(&hunk.header, false),
                         hunk_header_line(&hunk.header, true),
                     ),
-                    hunk_header_row(
+                    RenderRow::hunk_header(
                         file_index,
                         hunk_index,
                         side_by_side_hunk_header_line(&hunk.header, false, side_by_side_width),
@@ -354,7 +326,7 @@ fn cached_row_pair(rows: &CachedRows, index: usize) -> Option<(RenderRow, Render
 /// Returns an empty inline/side-by-side row pair for unavailable render content.
 fn blank_row_pair() -> (RenderRow, RenderRow) {
     (
-        RenderRow::Static(Line::default()),
-        RenderRow::Static(Line::default()),
+        RenderRow::static_line(Line::default()),
+        RenderRow::static_line(Line::default()),
     )
 }

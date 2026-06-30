@@ -5,8 +5,8 @@ use std::thread;
 use std::time::Instant;
 
 use crate::diff::DiffSession;
-use crate::layout::cache::build_hunk_node_for_worker;
-use crate::layout::model::HunkNode;
+use crate::layout::layout_tree::HunkNode;
+use crate::layout::primitives::LayoutWidths;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HunkBuildKey {
@@ -17,8 +17,7 @@ pub struct HunkBuildKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HunkBuildWindowRequest {
     pub generation: u64,
-    pub inline_width: usize,
-    pub side_by_side_width: usize,
+    pub widths: LayoutWidths,
     pub hunks: Vec<HunkBuildKey>,
 }
 
@@ -27,8 +26,7 @@ pub struct HunkBuildResult {
     pub generation: u64,
     pub file_index: usize,
     pub hunk_index: usize,
-    pub inline_width: usize,
-    pub side_by_side_width: usize,
+    pub widths: LayoutWidths,
     pub build_ms: u128,
     pub node: HunkNode,
 }
@@ -154,13 +152,12 @@ fn run_worker(
             };
 
             let build_start = Instant::now();
-            let node = build_hunk_node_for_worker(
+            let node = HunkNode::ready(
                 key.file_index,
                 key.hunk_index,
                 &file.path,
                 hunk,
-                request.inline_width,
-                request.side_by_side_width,
+                request.widths,
             );
 
             if !state.is_current(request.generation) {
@@ -172,8 +169,7 @@ fn run_worker(
                     generation: request.generation,
                     file_index: key.file_index,
                     hunk_index: key.hunk_index,
-                    inline_width: request.inline_width,
-                    side_by_side_width: request.side_by_side_width,
+                    widths: request.widths,
                     build_ms: build_start.elapsed().as_millis(),
                     node,
                 })
@@ -212,8 +208,7 @@ mod tests {
         worker.set_generation(2);
         worker.request_window(HunkBuildWindowRequest {
             generation: 1,
-            inline_width: 80,
-            side_by_side_width: 80,
+            widths: widths(),
             hunks: vec![HunkBuildKey {
                 file_index: 0,
                 hunk_index: 0,
@@ -221,8 +216,7 @@ mod tests {
         });
         worker.request_window(HunkBuildWindowRequest {
             generation: 2,
-            inline_width: 80,
-            side_by_side_width: 80,
+            widths: widths(),
             hunks: vec![HunkBuildKey {
                 file_index: 0,
                 hunk_index: 1,
@@ -250,8 +244,7 @@ mod tests {
     fn pending_windows_store_hunk_ids_only() {
         let request = HunkBuildWindowRequest {
             generation: 1,
-            inline_width: 80,
-            side_by_side_width: 80,
+            widths: widths(),
             hunks: vec![HunkBuildKey {
                 file_index: 3,
                 hunk_index: 5,
@@ -265,8 +258,7 @@ mod tests {
     fn window_request(generation: u64, hunks: &[usize]) -> HunkBuildWindowRequest {
         HunkBuildWindowRequest {
             generation,
-            inline_width: 80,
-            side_by_side_width: 80,
+            widths: widths(),
             hunks: hunks
                 .iter()
                 .copied()
@@ -275,6 +267,13 @@ mod tests {
                     hunk_index,
                 })
                 .collect(),
+        }
+    }
+
+    fn widths() -> LayoutWidths {
+        LayoutWidths {
+            inline: 80,
+            side_by_side: 80,
         }
     }
 

@@ -4,10 +4,44 @@ use ratatui::{
 };
 
 use crate::diff::DiffSession;
+use crate::layout::base_layout::BaseLayout;
 use crate::layout::lines::{combined_side_line, split_side_by_side_width};
-use crate::layout::model::{RowContext, RowKind};
+use crate::layout::plan::plan_row_contexts;
+use crate::layout::primitives::{
+    HunkRange, LayoutWidths, NoteInsertion, RenderRow, RowContext, RowKind,
+};
 use crate::layout::text::{fit_text, truncate_with_ellipsis, wrap_text};
 use crate::note::{Note, NoteTarget};
+
+pub(super) struct NoteOverlay {
+    pub insertions: Vec<NoteInsertion>,
+    pub hunk_ranges: Vec<HunkRange>,
+    pub row_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct NoteOverlayRequest<'a> {
+    pub session: &'a DiffSession,
+    pub base: &'a BaseLayout,
+    pub notes: &'a [Note],
+    pub expanded_note_ids: &'a [u64],
+    pub widths: LayoutWidths,
+}
+
+impl NoteOverlay {
+    pub(super) fn new(request: NoteOverlayRequest<'_>) -> Self {
+        let overlay = NoteInsertions::new(request);
+
+        Self {
+            hunk_ranges: adjust_hunk_ranges_for_insertions(
+                request.base.hunk_ranges.clone(),
+                &overlay.inserted_before_or_at_base,
+            ),
+            row_count: request.base.plan.row_count + overlay.inserted_total,
+            insertions: overlay.insertions,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NoteSide {
@@ -195,3 +229,101 @@ fn note_side_impl(note: &Note) -> NoteSide {
         _ => NoteSide::Full,
     }
 }
+
+struct NoteInsertions {
+    insertions: Vec<NoteInsertion>,
+    inserted_before_or_at_base: Vec<usize>,
+    inserted_total: usize,
+}
+
+impl NoteInsertions {
+    fn new(request: NoteOverlayRequest<'_>) -> Self {
+        if request.notes.is_empty() {
+            return Self {
+                insertions: Vec::new(),
+                inserted_before_or_at_base: vec![0usize; request.base.plan.row_count + 1],
+                inserted_total: 0,
+            };
+        }
+
+        let base_row_contexts = plan_row_contexts(request.session, &request.base.plan);
+        let note_anchors = build_note_anchors(request.session, request.notes, &base_row_contexts);
+        let mut insertions = Vec::new();
+        let mut inserted_before_or_at_base = vec![0usize; request.base.plan.row_count + 1];
+        let mut inserted_total = 0usize;
+        let note_wrap_width = request.widths.inline.min(request.widths.side_by_side);
+
+        for base_index in 0..request.base.plan.row_count {
+            for note in note_anchors
+                .iter()
+                .filter(|(anchor_index, _)| *anchor_index == base_index)
+                .map(|(_, note)| note)
+            {
+                let expanded = request.expanded_note_ids.contains(&note.id);
+                let note_rows = build_note_rows(note, note_wrap_width, expanded);
+                let context = RowContext::note(base_row_contexts[base_index], note.id);
+
+                let insertion = build_note_insertion(NoteInsertionRequest {
+                    base_index,
+                    note_rows: &note_rows,
+                    note,
+                    context,
+                    widths: request.widths,
+                });
+                inserted_total += insertion.len();
+                insertions.push(insertion);
+            }
+            inserted_before_or_at_base[base_index] = inserted_total;
+        }
+        inserted_before_or_at_base[request.base.plan.row_count] = inserted_total;
+
+        Self {
+            insertions,
+            inserted_before_or_at_base,
+            inserted_total,
+        }
+    }
+}
+
+struct NoteInsertionRequest<'a> {
+    base_index: usize,
+    note_rows: &'a [String],
+    note: &'a Note,
+    context: RowContext,
+    widths: LayoutWidths,
+}
+
+fn build_note_insertion(request: NoteInsertionRequest<'_>) -> NoteInsertion {
+    NoteInsertion {
+        base_index: request.base_index,
+        inline_rows: render_note_rows(request.note_rows, request.widths.inline)
+            .into_iter()
+            .map(RenderRow::note)
+            .collect(),
+        side_by_side_rows: render_side_by_side_note_rows(
+            request.note_rows,
+            request.widths.side_by_side,
+            request.note,
+        )
+        .into_iter()
+        .map(RenderRow::note)
+        .collect(),
+        context: request.context,
+    }
+}
+
+fn adjust_hunk_ranges_for_insertions(
+    hunk_ranges: Vec<HunkRange>,
+    inserted_before_or_at_base: &[usize],
+) -> Vec<HunkRange> {
+    hunk_ranges
+        .into_iter()
+        .map(|range| HunkRange {
+            file_index: range.file_index,
+            hunk_index: range.hunk_index,
+            start: range.start + inserted_before_or_at_base[range.start],
+        })
+        .collect()
+}
+
+// FIXME: No test coverage here?

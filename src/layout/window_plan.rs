@@ -14,6 +14,8 @@ pub(super) struct LoadedHunkPlan {
     pub ordered: Vec<HunkBuildKey>,
 }
 
+// FIXME: Again, why not have LoadedHunkPlan::new ?
+
 impl LoadedHunkPlan {
     /// Returns whether a hunk should have rendered rows loaded.
     pub fn contains(&self, file_index: usize, hunk_index: usize) -> bool {

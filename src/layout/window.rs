@@ -6,27 +6,10 @@
 //! decides which hunk render rows are currently kept in memory.
 
 use crate::diff::DiffSession;
-use crate::layout::cache::build_hunk_node_for_worker;
-use crate::layout::model::{CachedRows, LayoutTree, NodeStatus};
+use crate::layout::layout_tree::{CachedRows, HunkNode, LayoutTree, NodeStatus};
+use crate::layout::primitives::LayoutWidths;
 use crate::layout::window_plan::plan_loaded_hunks;
 use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
-
-/// Render widths used when building hunk rows.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let widths = LayoutWidths {
-///     inline: 80,
-///     side_by_side: 120,
-/// };
-/// // -> LayoutWidths { inline: 80, side_by_side: 120 }
-/// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LayoutWidths {
-    pub inline: usize,
-    pub side_by_side: usize,
-}
 
 /// Selection and viewport inputs used to choose which hunks are loaded.
 ///
@@ -93,6 +76,9 @@ pub(super) struct LoadedHunkLimits {
     pub max_evictions: usize,
 }
 
+// FIXME: Add docs for this, what is it for?
+// Should we have impl LoadedHunkUpdate with constructors/fns too? instead of the
+// apply_loaded_hunk_window_sync etc?
 #[derive(Debug)]
 pub(super) struct LoadedHunkUpdate {
     pub changed: bool,
@@ -137,14 +123,7 @@ pub(super) fn apply_loaded_hunk_window_sync(
                 continue;
             }
 
-            let node = build_hunk_node_for_worker(
-                file_index,
-                hunk_index,
-                &file.path,
-                hunk,
-                widths.inline,
-                widths.side_by_side,
-            );
+            let node = HunkNode::ready(file_index, hunk_index, &file.path, hunk, widths);
             built_rows += node.rows.row_contexts.len();
             *hunk_node = node;
             built_hunks += 1;
@@ -194,8 +173,7 @@ pub(super) fn apply_loaded_hunk_window(
         if result.generation != generation {
             continue;
         }
-        if result.inline_width != widths.inline || result.side_by_side_width != widths.side_by_side
-        {
+        if result.widths != widths {
             continue;
         }
         let should_be_ready = plan.contains(result.file_index, result.hunk_index);
@@ -260,8 +238,7 @@ pub(super) fn apply_loaded_hunk_window(
         if !requested_hunks.is_empty() {
             worker.request_window(HunkBuildWindowRequest {
                 generation,
-                inline_width: widths.inline,
-                side_by_side_width: widths.side_by_side,
+                widths,
                 hunks: requested_hunks,
             });
             changed = true;
