@@ -1,21 +1,12 @@
-use ratatui::text::Line;
 use std::time::Instant;
 
 use crate::diff::DiffSession;
-use crate::highlight::FileHighlighter;
-use crate::layout::lines::{
-    build_combined_side_line, build_inline_line, file_header_line, file_header_row,
-    file_separator_line, file_side_by_side_header_line, hunk_header_line, hunk_header_row,
-    side_by_side_hunk_header_line,
-};
+use crate::layout::cache::{build_hunk_node_for_worker, build_layout_tree};
 use crate::layout::model::{
-    BaseLayout, CachedRows, FileNode, HunkNode, HunkRange, Layout, LayoutTargetState, LayoutTree,
-    NodeStatus, NoteInsertion, RenderRow, RowContext, RowKind,
+    BaseLayout, CachedRows, Layout, LayoutTargetState, LayoutTree, NodeStatus,
 };
-use crate::layout::notes::{
-    build_note_anchors, build_note_rows, render_note_rows, render_side_by_side_note_rows,
-};
-use crate::layout::plan::{build_layout_plan, plan_row_contexts};
+use crate::layout::note_overlay::build_note_overlay;
+use crate::layout::plan::build_layout_plan;
 use crate::layout::window::{
     HunkWindowTarget, LayoutBuildOptions, LayoutWidths, LoadedHunkLimits, apply_loaded_hunk_window,
     apply_loaded_hunk_window_sync,
@@ -23,12 +14,6 @@ use crate::layout::window::{
 use crate::layout::worker::LayoutWorker;
 use crate::log;
 use crate::note::Note;
-
-struct NoteOverlay {
-    insertions: Vec<NoteInsertion>,
-    inserted_before_or_at_base: Vec<usize>,
-    inserted_total: usize,
-}
 
 impl Layout {
     /// Builds a fresh layout for the current diff, notes, dimensions, and target hunk.
@@ -259,7 +244,7 @@ impl Layout {
         timer.field("notes", notes.len());
         timer.field("expanded_notes", expanded_note_ids.len());
         timer.field("base_rows", self.base.plan.row_count);
-        let overlay = inject_notes(
+        let overlay = build_note_overlay(
             session,
             &self.base,
             notes,
@@ -268,12 +253,9 @@ impl Layout {
             self.side_by_side_width,
         );
 
-        self.hunk_ranges = adjust_hunk_ranges_for_insertions(
-            self.base.hunk_ranges.clone(),
-            &overlay.inserted_before_or_at_base,
-        );
+        self.hunk_ranges = overlay.hunk_ranges;
         self.note_insertions = overlay.insertions;
-        self.row_count = self.base.plan.row_count + overlay.inserted_total;
+        self.row_count = overlay.row_count;
         timer.field("rows", self.row_count);
     }
 }
@@ -311,278 +293,4 @@ fn build_base_layout(
     timer.field("built_hunks", window.built_hunks);
     timer.field("evicted_hunks", window.evicted_hunks);
     base
-}
-
-fn build_layout_tree(
-    session: &DiffSession,
-    inline_width: usize,
-    side_by_side_width: usize,
-) -> LayoutTree {
-    let files = session
-        .files
-        .iter()
-        .enumerate()
-        .map(|(file_index, file)| {
-            build_file_node(file_index, file, inline_width, side_by_side_width)
-        })
-        .collect();
-
-    LayoutTree { files }
-}
-
-fn build_file_node(
-    file_index: usize,
-    file: &crate::diff::DiffFile,
-    inline_width: usize,
-    side_by_side_width: usize,
-) -> FileNode {
-    let header = CachedRows {
-        inline_rows: vec![
-            RenderRow::Static(file_separator_line(inline_width)),
-            file_header_row(
-                file_index,
-                file_header_line(file, false, inline_width),
-                file_header_line(file, true, inline_width),
-            ),
-        ],
-        side_by_side_rows: vec![
-            RenderRow::Static(file_separator_line(side_by_side_width)),
-            file_header_row(
-                file_index,
-                file_side_by_side_header_line(file, false, side_by_side_width),
-                file_side_by_side_header_line(file, true, side_by_side_width),
-            ),
-        ],
-        row_contexts: vec![
-            RowContext {
-                file_index: Some(file_index),
-                hunk_index: None,
-                kind: RowKind::Separator,
-                old_lineno: None,
-                new_lineno: None,
-                note_id: None,
-            },
-            RowContext {
-                file_index: Some(file_index),
-                hunk_index: None,
-                kind: RowKind::FileHeader,
-                old_lineno: None,
-                new_lineno: None,
-                note_id: None,
-            },
-        ],
-    };
-
-    let hunks = file
-        .hunks
-        .iter()
-        .enumerate()
-        .map(|(hunk_index, _)| HunkNode {
-            file_index,
-            hunk_index,
-            status: NodeStatus::Unbuilt,
-            rows: CachedRows::default(),
-        })
-        .collect();
-
-    FileNode {
-        file_index,
-        status: NodeStatus::Ready,
-        header,
-        hunks,
-    }
-}
-
-fn build_hunk_node(
-    file_index: usize,
-    hunk_index: usize,
-    hunk: &crate::diff::DiffHunk,
-    inline_width: usize,
-    side_by_side_width: usize,
-    highlighter: &mut FileHighlighter<'static>,
-) -> HunkNode {
-    let mut inline_rows = vec![hunk_header_row(
-        file_index,
-        hunk_index,
-        hunk_header_line(&hunk.header, false),
-        hunk_header_line(&hunk.header, true),
-    )];
-    let mut side_by_side_rows = vec![hunk_header_row(
-        file_index,
-        hunk_index,
-        side_by_side_hunk_header_line(&hunk.header, false, side_by_side_width),
-        side_by_side_hunk_header_line(&hunk.header, true, side_by_side_width),
-    )];
-    let mut row_contexts = vec![RowContext {
-        file_index: Some(file_index),
-        hunk_index: Some(hunk_index),
-        kind: RowKind::HunkHeader,
-        old_lineno: None,
-        new_lineno: None,
-        note_id: None,
-    }];
-
-    for diff_line in &hunk.lines {
-        inline_rows.push(RenderRow::Static(build_inline_line(
-            diff_line,
-            inline_width,
-            highlighter,
-        )));
-        side_by_side_rows.push(RenderRow::Static(build_combined_side_line(
-            diff_line,
-            side_by_side_width,
-            highlighter,
-        )));
-        row_contexts.push(RowContext {
-            file_index: Some(file_index),
-            hunk_index: Some(hunk_index),
-            kind: RowKind::DiffLine,
-            old_lineno: diff_line.old_lineno(),
-            new_lineno: diff_line.new_lineno(),
-            note_id: None,
-        });
-    }
-
-    inline_rows.push(RenderRow::Static(Line::default()));
-    side_by_side_rows.push(RenderRow::Static(Line::default()));
-    row_contexts.push(RowContext {
-        file_index: Some(file_index),
-        hunk_index: Some(hunk_index),
-        kind: RowKind::Spacer,
-        old_lineno: None,
-        new_lineno: None,
-        note_id: None,
-    });
-
-    HunkNode {
-        file_index,
-        hunk_index,
-        status: NodeStatus::Ready,
-        rows: CachedRows {
-            inline_rows,
-            side_by_side_rows,
-            row_contexts,
-        },
-    }
-}
-
-/// Builds cached render rows for one hunk.
-///
-/// The worker calls this off-thread, while synchronous paths use it directly
-/// when immediate hunk residency is required.
-pub(crate) fn build_hunk_node_for_worker(
-    file_index: usize,
-    hunk_index: usize,
-    path: &str,
-    hunk: &crate::diff::DiffHunk,
-    inline_width: usize,
-    side_by_side_width: usize,
-) -> HunkNode {
-    let mut highlighter = FileHighlighter::new(path);
-    build_hunk_node(
-        file_index,
-        hunk_index,
-        hunk,
-        inline_width,
-        side_by_side_width,
-        &mut highlighter,
-    )
-}
-
-fn inject_notes(
-    session: &DiffSession,
-    base: &BaseLayout,
-    notes: &[Note],
-    expanded_note_ids: &[u64],
-    inline_width: usize,
-    side_by_side_width: usize,
-) -> NoteOverlay {
-    if notes.is_empty() {
-        return NoteOverlay {
-            insertions: Vec::new(),
-            inserted_before_or_at_base: vec![0usize; base.plan.row_count + 1],
-            inserted_total: 0,
-        };
-    }
-
-    let base_row_contexts = plan_row_contexts(session, &base.plan);
-    let note_anchors = build_note_anchors(session, notes, &base_row_contexts);
-    let mut insertions = Vec::new();
-    let mut inserted_before_or_at_base = vec![0usize; base.plan.row_count + 1];
-    let mut inserted_total = 0usize;
-    let note_wrap_width = inline_width.min(side_by_side_width);
-
-    for base_index in 0..base.plan.row_count {
-        for note in note_anchors
-            .iter()
-            .filter(|(anchor_index, _)| *anchor_index == base_index)
-            .map(|(_, note)| note)
-        {
-            let expanded = expanded_note_ids.contains(&note.id);
-            let note_rows = build_note_rows(note, note_wrap_width, expanded);
-            let note_context = RowContext {
-                file_index: base_row_contexts[base_index].file_index,
-                hunk_index: base_row_contexts[base_index].hunk_index,
-                kind: RowKind::Note,
-                old_lineno: None,
-                new_lineno: None,
-                note_id: Some(note.id),
-            };
-
-            let insertion = build_note_insertion(
-                base_index,
-                &note_rows,
-                note,
-                note_context,
-                inline_width,
-                side_by_side_width,
-            );
-            inserted_total += insertion.len();
-            insertions.push(insertion);
-        }
-        inserted_before_or_at_base[base_index] = inserted_total;
-    }
-    inserted_before_or_at_base[base.plan.row_count] = inserted_total;
-
-    NoteOverlay {
-        insertions,
-        inserted_before_or_at_base,
-        inserted_total,
-    }
-}
-
-fn build_note_insertion(
-    base_index: usize,
-    note_rows: &[String],
-    note: &Note,
-    note_context: RowContext,
-    inline_width: usize,
-    side_by_side_width: usize,
-) -> NoteInsertion {
-    NoteInsertion {
-        base_index,
-        inline_rows: render_note_rows(note_rows, inline_width)
-            .into_iter()
-            .map(RenderRow::Note)
-            .collect(),
-        side_by_side_rows: render_side_by_side_note_rows(note_rows, side_by_side_width, note)
-            .into_iter()
-            .map(RenderRow::Note)
-            .collect(),
-        context: note_context,
-    }
-}
-
-fn adjust_hunk_ranges_for_insertions(
-    hunk_ranges: Vec<HunkRange>,
-    inserted_before_or_at_base: &[usize],
-) -> Vec<HunkRange> {
-    hunk_ranges
-        .into_iter()
-        .map(|range| HunkRange {
-            file_index: range.file_index,
-            hunk_index: range.hunk_index,
-            start: range.start + inserted_before_or_at_base[range.start],
-        })
-        .collect()
 }

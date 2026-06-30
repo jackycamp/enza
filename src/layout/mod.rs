@@ -9,14 +9,17 @@
 
 mod access;
 mod build;
+mod cache;
 mod lines;
 mod model;
+mod note_overlay;
 mod notes;
 mod plan;
 #[cfg(test)]
 mod tests;
 mod text;
 mod window;
+mod window_plan;
 mod worker;
 
 pub use model::{Layout, NodeStatus, RowContext, RowKind, RowViewState};

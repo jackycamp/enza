@@ -116,10 +116,6 @@ pub struct LayoutTree {
 
 #[derive(Clone, Debug)]
 pub struct FileNode {
-    #[allow(dead_code)]
-    pub file_index: usize,
-    #[allow(dead_code)]
-    pub status: NodeStatus,
     pub header: CachedRows,
     pub hunks: Vec<HunkNode>,
 }
@@ -171,10 +167,7 @@ pub enum LayoutRowLocation {
 pub enum NodeStatus {
     Ready,
     Loading,
-    #[allow(dead_code)]
     Unbuilt,
-    #[allow(dead_code)]
-    Dirty,
 }
 
 #[derive(Clone, Copy, Debug)]

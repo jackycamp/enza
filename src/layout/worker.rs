@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::diff::DiffSession;
-use crate::layout::build::build_hunk_node_for_worker;
+use crate::layout::cache::build_hunk_node_for_worker;
 use crate::layout::model::HunkNode;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
