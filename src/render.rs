@@ -24,15 +24,29 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         inline: inline_width,
         side_by_side: side_width,
     };
-    let target = HunkWindowTarget {
-        selected_file: app.main_pane.selected_file,
-        selected_hunk: app.main_pane.selected_hunk,
-        viewport_rows,
-        overscan_rows,
-    };
     let needs_rebuild = app.layout.as_ref().is_none_or(|layout| {
         layout.inline_width != inline_width || layout.side_by_side_width != side_width
     });
+    let target = app
+        .layout
+        .as_ref()
+        .filter(|_| !needs_rebuild)
+        .map(|layout| {
+            layout.hunk_window_target(
+                app.main_pane.selected_file,
+                app.main_pane.selected_hunk,
+                app.main_pane.scroll,
+                viewport_rows,
+                overscan_rows,
+            )
+        })
+        .unwrap_or(HunkWindowTarget {
+            selected_file: app.main_pane.selected_file,
+            selected_hunk: app.main_pane.selected_hunk,
+            visible_start_row: None,
+            viewport_rows,
+            overscan_rows,
+        });
     let previous_visual_offset = app
         .main_pane
         .cursor_row
@@ -535,7 +549,7 @@ fn debug_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     }
 
     for event in events.iter().take(5) {
-        lines.push(Line::from(format_debug_event(&event, width)));
+        lines.push(Line::from(format_debug_event(event, width)));
     }
 
     if lines.is_empty() {

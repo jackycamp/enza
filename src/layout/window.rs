@@ -7,8 +7,9 @@
 
 use crate::diff::DiffSession;
 use crate::layout::layout_tree::{CachedRows, HunkNode, LayoutTree, NodeStatus};
+use crate::layout::primitives::LayoutPlan;
 use crate::layout::primitives::LayoutWidths;
-use crate::layout::window_plan::plan_loaded_hunks;
+use crate::layout::window_plan::LoadedHunkPlan;
 use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
 
 /// Selection and viewport inputs used to choose which hunks are loaded.
@@ -19,12 +20,14 @@ use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
 /// let target = HunkWindowTarget {
 ///     selected_file: 0,
 ///     selected_hunk: 2,
+///     visible_start_row: Some(120),
 ///     viewport_rows: 40,
 ///     overscan_rows: 80,
 /// };
 /// // -> HunkWindowTarget {
 /// //      selected_file: 0,
 /// //      selected_hunk: 2,
+/// //      visible_start_row: Some(120),
 /// //      viewport_rows: 40,
 /// //      overscan_rows: 80,
 /// //    }
@@ -33,6 +36,7 @@ use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
 pub(crate) struct HunkWindowTarget {
     pub selected_file: usize,
     pub selected_hunk: usize,
+    pub visible_start_row: Option<usize>,
     pub viewport_rows: usize,
     pub overscan_rows: usize,
 }
@@ -50,6 +54,7 @@ pub(crate) struct HunkWindowTarget {
 ///     target: HunkWindowTarget {
 ///         selected_file: 0,
 ///         selected_hunk: 2,
+///         visible_start_row: None,
 ///         viewport_rows: 40,
 ///         overscan_rows: 80,
 ///     },
@@ -59,6 +64,7 @@ pub(crate) struct HunkWindowTarget {
 /// //      target: HunkWindowTarget {
 /// //          selected_file: 0,
 /// //          selected_hunk: 2,
+/// //          visible_start_row: None,
 /// //          viewport_rows: 40,
 /// //          overscan_rows: 80,
 /// //      },
@@ -76,9 +82,21 @@ pub(super) struct LoadedHunkLimits {
     pub max_evictions: usize,
 }
 
-// FIXME: Add docs for this, what is it for?
-// Should we have impl LoadedHunkUpdate with constructors/fns too? instead of the
-// apply_loaded_hunk_window_sync etc?
+pub(super) struct LoadedHunkWindowRequest<'a> {
+    pub plan: &'a LayoutPlan,
+    pub worker: &'a LayoutWorker,
+    pub generation: u64,
+    pub session: &'a DiffSession,
+    pub widths: LayoutWidths,
+    pub target: HunkWindowTarget,
+    pub limits: LoadedHunkLimits,
+}
+
+/// Summary of one loaded-hunk reconciliation pass.
+///
+/// This is diagnostic and control-flow output from the sync/async window
+/// appliers: it tells callers whether the tree changed, how much work was
+/// built/queued/evicted, and how much worker output was accepted.
 #[derive(Debug)]
 pub(super) struct LoadedHunkUpdate {
     pub changed: bool,
@@ -98,11 +116,12 @@ pub(super) struct LoadedHunkUpdate {
 /// without waiting for the worker thread.
 pub(super) fn apply_loaded_hunk_window_sync(
     tree: &mut LayoutTree,
+    plan: &LayoutPlan,
     session: &DiffSession,
     widths: LayoutWidths,
     target: HunkWindowTarget,
 ) -> LoadedHunkUpdate {
-    let plan = plan_loaded_hunks(session, target);
+    let plan = LoadedHunkPlan::new(session, plan, target);
     let mut changed = false;
     let mut built_hunks = 0usize;
     let mut built_rows = 0usize;
@@ -151,14 +170,9 @@ pub(super) fn apply_loaded_hunk_window_sync(
 /// queued.
 pub(super) fn apply_loaded_hunk_window(
     tree: &mut LayoutTree,
-    worker: &LayoutWorker,
-    generation: u64,
-    session: &DiffSession,
-    widths: LayoutWidths,
-    target: HunkWindowTarget,
-    limits: LoadedHunkLimits,
+    request: LoadedHunkWindowRequest<'_>,
 ) -> LoadedHunkUpdate {
-    let plan = plan_loaded_hunks(session, target);
+    let plan = LoadedHunkPlan::new(request.session, request.plan, request.target);
     let mut changed = false;
     let mut built_hunks = 0usize;
     let mut evicted_hunks = 0usize;
@@ -169,11 +183,11 @@ pub(super) fn apply_loaded_hunk_window(
     let mut queued_hunks = 0usize;
     let mut applied_hunks = 0usize;
 
-    for result in worker.drain_completed() {
-        if result.generation != generation {
+    for result in request.worker.drain_completed() {
+        if result.generation != request.generation {
             continue;
         }
-        if result.widths != widths {
+        if result.widths != request.widths {
             continue;
         }
         let should_be_ready = plan.contains(result.file_index, result.hunk_index);
@@ -201,14 +215,19 @@ pub(super) fn apply_loaded_hunk_window(
         }
     }
 
-    for (file_index, file_node) in tree.files.iter().enumerate() {
-        for (hunk_index, hunk_node) in file_node.hunks.iter().enumerate() {
+    for (file_index, file_node) in tree.files.iter_mut().enumerate() {
+        for (hunk_index, hunk_node) in file_node.hunks.iter_mut().enumerate() {
             let should_be_ready = plan.contains(file_index, hunk_index);
             match (hunk_node.status, should_be_ready) {
                 (NodeStatus::Unbuilt | NodeStatus::Loading, true) => {
                     missing_hunks += 1;
                 }
                 (NodeStatus::Ready, false) => extra_hunks += 1,
+                (NodeStatus::Loading, false) => {
+                    hunk_node.status = NodeStatus::Unbuilt;
+                    hunk_node.rows = CachedRows::default();
+                    changed = true;
+                }
                 _ => {}
             }
         }
@@ -217,7 +236,7 @@ pub(super) fn apply_loaded_hunk_window(
     if missing_hunks > 0 {
         let mut requested_hunks = Vec::new();
         for key in &plan.ordered {
-            if queued_hunks >= limits.max_builds {
+            if queued_hunks >= request.limits.max_builds {
                 break;
             }
             let Some(file_node) = tree.files.get_mut(key.file_index) else {
@@ -227,7 +246,7 @@ pub(super) fn apply_loaded_hunk_window(
                 continue;
             };
 
-            if hunk_node.status == NodeStatus::Unbuilt {
+            if hunk_node.status != NodeStatus::Ready {
                 hunk_node.status = NodeStatus::Loading;
                 requested_hunks.push(*key);
                 queued_hunks += 1;
@@ -236,23 +255,23 @@ pub(super) fn apply_loaded_hunk_window(
         }
 
         if !requested_hunks.is_empty() {
-            worker.request_window(HunkBuildWindowRequest {
-                generation,
-                widths,
+            request.worker.request_window(HunkBuildWindowRequest {
+                generation: request.generation,
+                widths: request.widths,
                 hunks: requested_hunks,
             });
             changed = true;
         }
     }
 
-    let remaining_missing = missing_hunks.saturating_sub(built_hunks);
+    let remaining_missing = missing_hunks;
     if remaining_missing == 0 {
         for file_node in &mut tree.files {
             for hunk_node in &mut file_node.hunks {
                 let should_be_ready = plan.contains(hunk_node.file_index, hunk_node.hunk_index);
                 if hunk_node.status == NodeStatus::Ready
                     && !should_be_ready
-                    && evicted_hunks < limits.max_evictions
+                    && evicted_hunks < request.limits.max_evictions
                 {
                     hunk_node.status = NodeStatus::Unbuilt;
                     hunk_node.rows = CachedRows::default();

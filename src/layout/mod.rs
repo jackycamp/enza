@@ -16,13 +16,13 @@ use ratatui::{
 
 use crate::diff::DiffSession;
 use crate::layout::base_layout::BaseLayout;
-use crate::layout::layout_tree::{CachedRows, HunkNode, LayoutTree};
+use crate::layout::layout_tree::HunkNode;
 use crate::layout::notes::{NoteOverlay, NoteOverlayRequest};
 use crate::layout::plan::{
     plan_row_index_for_context, plan_row_to_render_rows, row_context_for_plan_row,
 };
 use crate::layout::primitives::{HunkRange, LayoutRowLocation, NoteInsertion, RenderRow};
-use crate::layout::window::{LoadedHunkLimits, apply_loaded_hunk_window};
+use crate::layout::window::{LoadedHunkLimits, LoadedHunkWindowRequest, apply_loaded_hunk_window};
 use crate::log;
 use crate::note::Note;
 
@@ -62,6 +62,7 @@ struct LayoutTargetState {
     generation_ready: bool,
     file: usize,
     hunk: usize,
+    visible_start_row: Option<usize>,
     viewport_rows: usize,
     overscan_rows: usize,
 }
@@ -79,6 +80,7 @@ impl Layout {
     /// let target = HunkWindowTarget {
     ///     selected_file: 0,
     ///     selected_hunk: 2,
+    ///     visible_start_row: None,
     ///     viewport_rows: 40,
     ///     overscan_rows: 80,
     /// };
@@ -121,6 +123,7 @@ impl Layout {
                 generation_ready: false,
                 file: options.target.selected_file,
                 hunk: options.target.selected_hunk,
+                visible_start_row: options.target.visible_start_row,
                 viewport_rows: options.target.viewport_rows,
                 overscan_rows: options.target.overscan_rows,
             },
@@ -138,8 +141,8 @@ impl Layout {
     /// Updates loaded hunk rows for a new viewport or selected hunk.
     ///
     /// Returns `true` when hunk rows were built, queued, applied, or unloaded and
-    /// inserted note rows were refreshed. Target changes advance the worker generation
-    /// and discard stale loading hunks.
+    /// inserted note rows were refreshed. Target movement changes scheduling
+    /// priority without invalidating compatible in-flight hunk builds.
     pub fn ensure_hunk_window(
         &mut self,
         worker: &LayoutWorker,
@@ -148,25 +151,29 @@ impl Layout {
         expanded_note_ids: &[u64],
         target: HunkWindowTarget,
     ) -> bool {
-        if !self.target_state.generation_ready || self.target_window_changed(target) {
+        if !self.target_state.generation_ready {
             self.target_state.generation = worker.next_generation();
             self.target_state.generation_ready = true;
-            self.store_target_window(target);
-            reset_loading_hunks(&mut self.base.tree);
             worker.set_generation(self.target_state.generation);
+        }
+        if self.target_window_changed(target) {
+            self.store_target_window(target);
         }
         let expand_start = Instant::now();
         let widths = self.widths();
         let window = apply_loaded_hunk_window(
             &mut self.base.tree,
-            worker,
-            self.target_state.generation,
-            session,
-            widths,
-            target,
-            LoadedHunkLimits {
-                max_builds: 2,
-                max_evictions: 1,
+            LoadedHunkWindowRequest {
+                plan: &self.base.plan,
+                worker,
+                generation: self.target_state.generation,
+                session,
+                widths,
+                target,
+                limits: LoadedHunkLimits {
+                    max_builds: 2,
+                    max_evictions: 1,
+                },
             },
         );
         if !window.changed {
@@ -183,6 +190,13 @@ impl Layout {
             ("elapsed_ms", expand_start.elapsed().as_millis().to_string()),
             ("selected_file", target.selected_file.to_string()),
             ("selected_hunk", target.selected_hunk.to_string()),
+            (
+                "visible_start_row",
+                target
+                    .visible_start_row
+                    .map(|row| row.to_string())
+                    .unwrap_or_else(|| "selected".to_string()),
+            ),
             ("viewport_rows", target.viewport_rows.to_string()),
             ("overscan_rows", target.overscan_rows.to_string()),
             ("built_hunks", window.built_hunks.to_string()),
@@ -208,6 +222,7 @@ impl Layout {
     fn target_window_changed(&self, target: HunkWindowTarget) -> bool {
         self.target_state.file != target.selected_file
             || self.target_state.hunk != target.selected_hunk
+            || self.target_state.visible_start_row != target.visible_start_row
             || self.target_state.viewport_rows != target.viewport_rows
             || self.target_state.overscan_rows != target.overscan_rows
     }
@@ -215,6 +230,7 @@ impl Layout {
     fn store_target_window(&mut self, target: HunkWindowTarget) {
         self.target_state.file = target.selected_file;
         self.target_state.hunk = target.selected_hunk;
+        self.target_state.visible_start_row = target.visible_start_row;
         self.target_state.viewport_rows = target.viewport_rows;
         self.target_state.overscan_rows = target.overscan_rows;
     }
@@ -414,6 +430,24 @@ impl Layout {
         Some(base_index + inserted_before_or_at)
     }
 
+    /// Builds a hunk loading target from the currently visible rendered rows.
+    pub(crate) fn hunk_window_target(
+        &self,
+        selected_file: usize,
+        selected_hunk: usize,
+        scroll: u16,
+        viewport_rows: usize,
+        overscan_rows: usize,
+    ) -> HunkWindowTarget {
+        HunkWindowTarget {
+            selected_file,
+            selected_hunk,
+            visible_start_row: Some(self.base_row_for_rendered_row(scroll as usize)),
+            viewport_rows,
+            overscan_rows,
+        }
+    }
+
     /// Splits a rendered row index into either a base row or inserted note row.
     pub(crate) fn locate_row(&self, row: usize) -> Option<LayoutRowLocation> {
         if row >= self.row_count {
@@ -445,6 +479,20 @@ impl Layout {
         })
     }
 
+    fn base_row_for_rendered_row(&self, row: usize) -> usize {
+        match self.locate_row(row.min(self.row_count.saturating_sub(1))) {
+            Some(LayoutRowLocation::Base { base_index }) => base_index,
+            Some(LayoutRowLocation::Note {
+                insertion_index, ..
+            }) => self
+                .note_insertions
+                .get(insertion_index)
+                .map(|insertion| insertion.base_index)
+                .unwrap_or_else(|| self.base.plan.row_count.saturating_sub(1)),
+            None => self.base.plan.row_count.saturating_sub(1),
+        }
+    }
+
     fn widths(&self) -> LayoutWidths {
         LayoutWidths {
             inline: self.inline_width,
@@ -464,17 +512,6 @@ fn note_row_index(insertions: &[NoteInsertion], target: RowContext) -> Option<us
         inserted_before += insertion.len();
     }
     None
-}
-
-fn reset_loading_hunks(tree: &mut LayoutTree) {
-    for file in &mut tree.files {
-        for hunk in &mut file.hunks {
-            if hunk.status == NodeStatus::Loading {
-                hunk.status = NodeStatus::Unbuilt;
-                hunk.rows = CachedRows::default();
-            }
-        }
-    }
 }
 
 /// Applies cursor background styling to an already-rendered line.

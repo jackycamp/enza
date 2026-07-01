@@ -326,4 +326,199 @@ fn adjust_hunk_ranges_for_insertions(
         .collect()
 }
 
-// FIXME: No test coverage here?
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{DiffFile, DiffHunk, DiffLine};
+    use crate::layout::base_layout::BaseLayout;
+    use crate::layout::layout_tree::LayoutTree;
+    use crate::layout::primitives::{LayoutPlan, LayoutWidths};
+
+    #[test]
+    fn note_anchors_resolve_file_hunk_line_and_range_targets() {
+        let session = session_with_one_hunk();
+        let plan = LayoutPlan::new(&session);
+        let contexts = plan_row_contexts(&session, &plan);
+        let notes = vec![
+            Note::new(
+                1,
+                NoteTarget::File {
+                    file_path: "test.rs".to_string(),
+                },
+                "file".to_string(),
+            ),
+            Note::new(
+                2,
+                NoteTarget::Hunk {
+                    file_path: "test.rs".to_string(),
+                    hunk_header: "@@ hunk 0 @@".to_string(),
+                },
+                "hunk".to_string(),
+            ),
+            Note::new(
+                3,
+                NoteTarget::Line {
+                    file_path: "test.rs".to_string(),
+                    old_lineno: None,
+                    new_lineno: Some(2),
+                },
+                "line".to_string(),
+            ),
+            Note::new(
+                4,
+                NoteTarget::Range {
+                    file_path: "test.rs".to_string(),
+                    start_old_lineno: Some(1),
+                    start_new_lineno: Some(1),
+                    end_old_lineno: None,
+                    end_new_lineno: Some(2),
+                },
+                "range".to_string(),
+            ),
+        ];
+
+        let anchors: Vec<_> = build_note_anchors(&session, &notes, &contexts)
+            .into_iter()
+            .map(|(row, note)| (row, note.id))
+            .collect();
+
+        assert_eq!(anchors, vec![(1, 1), (2, 2), (4, 3), (3, 4)]);
+    }
+
+    #[test]
+    fn collapsed_note_rows_truncate_and_expanded_rows_keep_wrapping() {
+        let note = Note::new(
+            1,
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            "alpha betagammadelta epsilon zeta eta theta iota".to_string(),
+        );
+
+        let collapsed = build_note_rows(&note, 14, false);
+        let expanded = build_note_rows(&note, 14, true);
+
+        assert_eq!(collapsed.len(), 2);
+        assert!(collapsed.last().unwrap().ends_with('…'));
+        assert!(expanded.len() > collapsed.len());
+    }
+
+    #[test]
+    fn side_by_side_notes_render_on_the_changed_side() {
+        let removed_note = Note::new(
+            1,
+            NoteTarget::Line {
+                file_path: "test.rs".to_string(),
+                old_lineno: Some(1),
+                new_lineno: None,
+            },
+            "removed".to_string(),
+        );
+        let added_note = Note::new(
+            2,
+            NoteTarget::Line {
+                file_path: "test.rs".to_string(),
+                old_lineno: None,
+                new_lineno: Some(2),
+            },
+            "added".to_string(),
+        );
+
+        let removed_line = plain_text(
+            &render_side_by_side_note_rows(&["removed".to_string()], 30, &removed_note)[1],
+        );
+        let added_line =
+            plain_text(&render_side_by_side_note_rows(&["added".to_string()], 30, &added_note)[1]);
+
+        assert!(removed_line.starts_with("│ removed"));
+        assert!(removed_line.ends_with("               "));
+        assert!(added_line.starts_with("              │ "));
+        assert!(added_line.contains("│ added"));
+    }
+
+    #[test]
+    fn note_overlay_adjusts_hunk_ranges_by_full_inserted_height() {
+        let session = session_with_two_hunks();
+        let base = base_layout(&session);
+        let note = Note::new(
+            1,
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            "file note".to_string(),
+        );
+
+        let overlay = NoteOverlay::new(NoteOverlayRequest {
+            session: &session,
+            base: &base,
+            notes: &[note],
+            expanded_note_ids: &[],
+            widths: widths(),
+        });
+
+        assert_eq!(overlay.insertions[0].len(), 3);
+        assert_eq!(overlay.row_count, base.plan.row_count + 3);
+        assert_eq!(overlay.hunk_ranges[0].start, base.hunk_ranges[0].start + 3);
+        assert_eq!(overlay.hunk_ranges[1].start, base.hunk_ranges[1].start + 3);
+    }
+
+    fn base_layout(session: &DiffSession) -> BaseLayout {
+        let plan = LayoutPlan::new(session);
+        BaseLayout {
+            tree: LayoutTree::new(session, widths()),
+            hunk_ranges: plan.hunk_ranges.clone(),
+            plan,
+        }
+    }
+
+    fn widths() -> LayoutWidths {
+        LayoutWidths {
+            inline: 30,
+            side_by_side: 30,
+        }
+    }
+
+    fn plain_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn session_with_one_hunk() -> DiffSession {
+        DiffSession {
+            files: vec![DiffFile {
+                path: "test.rs".to_string(),
+                old_path: "test.rs".to_string(),
+                new_path: "test.rs".to_string(),
+                hunks: vec![DiffHunk {
+                    header: "@@ hunk 0 @@".to_string(),
+                    lines: vec![
+                        DiffLine::Context {
+                            old_lineno: 1,
+                            new_lineno: 1,
+                            text: "same".to_string(),
+                        },
+                        DiffLine::Added {
+                            new_lineno: 2,
+                            text: "added".to_string(),
+                        },
+                    ],
+                }],
+            }],
+        }
+    }
+
+    fn session_with_two_hunks() -> DiffSession {
+        let mut session = session_with_one_hunk();
+        session.files[0].hunks.push(DiffHunk {
+            header: "@@ hunk 1 @@".to_string(),
+            lines: vec![DiffLine::Context {
+                old_lineno: 3,
+                new_lineno: 3,
+                text: "later".to_string(),
+            }],
+        });
+        session
+    }
+}

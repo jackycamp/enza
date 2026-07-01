@@ -1,6 +1,6 @@
 use crate::{
-    layout::{RowContext, RowKind},
     diff::DiffFile,
+    layout::{RowContext, RowKind},
     note::NoteTarget,
 };
 

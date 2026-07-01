@@ -81,6 +81,24 @@ fn last_row_belongs_to_the_last_hunk_not_a_file_spacer() {
     assert_eq!(last_context.kind, RowKind::Spacer);
 }
 
+#[test]
+fn moving_the_window_target_does_not_advance_the_layout_generation() {
+    let session = session_with_hunks(5);
+    let worker = LayoutWorker::new(Arc::new(session.clone()));
+    let mut layout = Layout::build(&session, &[], &[], build_options(0, 1, 0));
+
+    layout.ensure_hunk_window(&worker, &session, &[], &[], window_target(1, 1, 0));
+    let generation = layout.target_state.generation;
+    assert!(generation > 0);
+
+    layout.ensure_hunk_window(&worker, &session, &[], &[], window_target(2, 1, 0));
+
+    assert_eq!(
+        layout.target_state.generation, generation,
+        "moving the viewport target should not invalidate compatible in-flight hunk builds"
+    );
+}
+
 fn build_options(
     selected_hunk: usize,
     viewport_rows: usize,
@@ -103,6 +121,7 @@ fn window_target(
     HunkWindowTarget {
         selected_file: 0,
         selected_hunk,
+        visible_start_row: None,
         viewport_rows,
         overscan_rows,
     }

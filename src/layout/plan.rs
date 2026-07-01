@@ -14,50 +14,50 @@ use crate::layout::primitives::{
     HunkRange, LayoutPlan, PlannedFile, PlannedHunk, RenderRow, RowContext, RowId, RowKind,
 };
 
-// FIXME: At this point why isn't build_layout_plan just LayoutPlan::new ?
+impl LayoutPlan {
+    /// Builds base row metadata from the parsed diff.
+    ///
+    /// Rows include file separators, file headers, hunk headers, diff lines, and
+    /// spacer rows. The plan stores only file/hunk start rows and row counts.
+    pub(super) fn new(session: &DiffSession) -> Self {
+        let mut files = Vec::new();
+        let mut hunk_ranges = Vec::new();
+        let mut row_count = 0usize;
 
-/// Builds base row metadata from the parsed diff.
-///
-/// Rows include file separators, file headers, hunk headers, diff lines, and
-/// spacer rows. The plan stores only file/hunk start rows and row counts.
-pub(super) fn build_layout_plan(session: &DiffSession) -> LayoutPlan {
-    let mut files = Vec::new();
-    let mut hunk_ranges = Vec::new();
-    let mut row_count = 0usize;
+        for (file_index, file) in session.files.iter().enumerate() {
+            let file_start = row_count;
+            row_count += 2;
 
-    for (file_index, file) in session.files.iter().enumerate() {
-        let file_start = row_count;
-        row_count += 2;
+            let mut hunks = Vec::with_capacity(file.hunks.len());
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                let start = row_count;
+                hunk_ranges.push(HunkRange {
+                    file_index,
+                    hunk_index,
+                    start,
+                });
+                hunks.push(PlannedHunk {
+                    file_index,
+                    hunk_index,
+                    start,
+                    line_count: hunk.lines.len(),
+                });
+                row_count += hunk.lines.len() + 2;
+            }
 
-        let mut hunks = Vec::with_capacity(file.hunks.len());
-        for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-            let start = row_count;
-            hunk_ranges.push(HunkRange {
+            files.push(PlannedFile {
                 file_index,
-                hunk_index,
-                start,
+                start: file_start,
+                end: row_count,
+                hunks,
             });
-            hunks.push(PlannedHunk {
-                file_index,
-                hunk_index,
-                start,
-                line_count: hunk.lines.len(),
-            });
-            row_count += hunk.lines.len() + 2;
         }
 
-        files.push(PlannedFile {
-            file_index,
-            start: file_start,
-            end: row_count,
-            hunks,
-        });
-    }
-
-    LayoutPlan {
-        files,
-        hunk_ranges,
-        row_count,
+        Self {
+            files,
+            hunk_ranges,
+            row_count,
+        }
     }
 }
 

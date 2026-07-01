@@ -435,6 +435,7 @@ mod tests {
         HunkWindowTarget {
             selected_file: 0,
             selected_hunk,
+            visible_start_row: None,
             viewport_rows,
             overscan_rows,
         }

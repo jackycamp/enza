@@ -297,10 +297,11 @@ fn collect_diff_files(
             hunks.push(DiffHunk { header, lines });
         }
 
-        if allow_worktree_fallback && hunks.is_empty() {
-            if let Some(hunk) = synthetic_added_file_hunk(workdir, &delta, &new_path) {
-                hunks.push(hunk);
-            }
+        if allow_worktree_fallback
+            && hunks.is_empty()
+            && let Some(hunk) = synthetic_added_file_hunk(workdir, &delta, &new_path)
+        {
+            hunks.push(hunk);
         }
 
         files.push(DiffFile {

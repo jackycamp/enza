@@ -210,7 +210,6 @@ struct InlineDiffStyle<'a> {
     diff_kind: DiffKind,
 }
 
-// FIXME: No docs?
 impl<'a> From<&'a DiffLine> for InlineDiffStyle<'a> {
     fn from(diff_line: &'a DiffLine) -> Self {
         match diff_line {
