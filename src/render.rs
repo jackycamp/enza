@@ -6,25 +6,87 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::layout::{Layout as DiffLayout, RowViewState};
+use crate::layout::{
+    HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
+    RowViewState,
+};
 use crate::log;
 use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
+const OVERSCAN_MULTIPLIER: usize = 2;
+
 pub fn ensure_layout(app: &mut App, area: Rect) {
     let (inline_width, side_width) = render_widths(app, area);
+    let viewport_rows = viewport_line_capacity(app, area).max(1);
+    let overscan_rows = viewport_rows.saturating_mul(OVERSCAN_MULTIPLIER);
+    let widths = LayoutWidths {
+        inline: inline_width,
+        side_by_side: side_width,
+    };
     let needs_rebuild = app.layout.as_ref().is_none_or(|layout| {
         layout.inline_width != inline_width || layout.side_by_side_width != side_width
     });
+    let target = app
+        .layout
+        .as_ref()
+        .filter(|_| !needs_rebuild)
+        .map(|layout| {
+            layout.hunk_window_target(
+                app.main_pane.selected_file,
+                app.main_pane.selected_hunk,
+                app.main_pane.scroll,
+                viewport_rows,
+                overscan_rows,
+            )
+        })
+        .unwrap_or(HunkWindowTarget {
+            selected_file: app.main_pane.selected_file,
+            selected_hunk: app.main_pane.selected_hunk,
+            visible_start_row: None,
+            viewport_rows,
+            overscan_rows,
+        });
+    let previous_visual_offset = app
+        .main_pane
+        .cursor_row
+        .saturating_sub(app.main_pane.scroll as usize);
+    let previous_cursor = app
+        .layout
+        .as_ref()
+        .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row));
 
     if needs_rebuild {
         app.layout = Some(DiffLayout::build(
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
-            inline_width,
-            side_width,
+            LayoutBuildOptions { widths, target },
         ));
+    } else if let Some(layout) = &mut app.layout {
+        let _ = layout.ensure_hunk_window(
+            &app.layout_worker,
+            &app.session,
+            &app.notes.items,
+            &app.notes.expanded_ids,
+            target,
+        );
+    }
+
+    if let Some(context) = previous_cursor
+        && let Some(layout) = &app.layout
+    {
+        if let Some(index) = row_index_for_context(layout, &app.session, context) {
+            app.main_pane.cursor_row = index;
+            app.main_pane.scroll = index.saturating_sub(previous_visual_offset) as u16;
+        } else if let Some(range) = layout.hunk_ranges.iter().find(|range| {
+            range.file_index == app.main_pane.selected_file
+                && range.hunk_index == app.main_pane.selected_hunk
+        }) {
+            app.main_pane.cursor_row = range.start;
+            app.main_pane.selection_anchor = None;
+            app.main_pane.scroll = range.start.saturating_sub(previous_visual_offset) as u16;
+        }
     }
 }
 
@@ -49,6 +111,16 @@ pub fn max_cursor_row(app: &App) -> usize {
 }
 
 pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
+    if let Some(layout) = &mut app.layout {
+        let _ = layout.ensure_selected_hunk_ready_sync(
+            &app.session,
+            &app.notes.items,
+            &app.notes.expanded_ids,
+            app.main_pane.selected_file,
+            app.main_pane.selected_hunk,
+        );
+    }
+
     let Some(layout) = &app.layout else {
         return;
     };
@@ -61,6 +133,23 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     };
 
     app.main_pane.cursor_row = range.start;
+    app.main_pane.scroll = if app.main_pane.selected_hunk == 0 {
+        layout
+            .row_index_for_context(
+                &app.session,
+                crate::layout::RowContext {
+                    file_index: Some(app.main_pane.selected_file),
+                    hunk_index: None,
+                    kind: crate::layout::RowKind::FileHeader,
+                    old_lineno: None,
+                    new_lineno: None,
+                    note_id: None,
+                },
+            )
+            .unwrap_or(range.start) as u16
+    } else {
+        range.start as u16
+    };
     ensure_cursor_visible(app, area);
 }
 
@@ -154,7 +243,7 @@ fn render_sidebar_files(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_debug_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let lines = debug_lines(area.width.saturating_sub(2) as usize);
+    let lines = debug_lines(app, area.width.saturating_sub(2) as usize);
     let title = if app.global.focus == FocusPane::Files {
         " Debug "
     } else {
@@ -189,9 +278,11 @@ fn render_side_by_side(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let lines = layout.materialize_rows(
+    let lines = layout.render_visible_rows(
+        &app.session,
         true,
         &row_view_state(app, app.global.focus == FocusPane::Main),
+        viewport_line_capacity(app, area),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
@@ -213,9 +304,11 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let lines = layout.materialize_rows(
+    let lines = layout.render_visible_rows(
+        &app.session,
         false,
         &row_view_state(app, app.global.focus == FocusPane::Main),
+        viewport_line_capacity(app, area),
     );
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("", app.global.focus == FocusPane::Main)),
@@ -399,10 +492,64 @@ fn sidebar_entry_style(app: &App, entry: &SidebarEntry) -> Style {
     }
 }
 
-fn debug_lines(width: usize) -> Vec<Line<'static>> {
+fn debug_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for event in log::recent_events(8) {
-        lines.push(Line::from(format_debug_event(&event, width)));
+    let events = log::recent_events(32);
+
+    if let Some(rss_mb) = latest_field(&events, "rss_mb") {
+        lines.push(Line::from(format!("Memory {}MB", rss_mb)));
+    }
+    if let Some(layout) = &app.layout {
+        let ready_hunks = layout
+            .base
+            .tree
+            .files
+            .iter()
+            .flat_map(|file| file.hunks.iter())
+            .filter(|hunk| hunk.status == NodeStatus::Ready)
+            .count();
+        let pending_hunks = layout
+            .base
+            .tree
+            .files
+            .iter()
+            .flat_map(|file| file.hunks.iter())
+            .filter(|hunk| hunk.status != NodeStatus::Ready)
+            .count();
+        lines.push(Line::from(format!("Ready Hunks {}", ready_hunks)));
+        lines.push(Line::from(format!("Pending Hunks {}", pending_hunks)));
+        lines.push(Line::from(format!(
+            "Base Rows {}",
+            layout.base.plan.row_count
+        )));
+        lines.push(Line::from(format!(
+            "Target Hunk {}:{}",
+            app.main_pane.selected_file, app.main_pane.selected_hunk
+        )));
+    }
+
+    if !lines.is_empty() {
+        lines.push(Line::default());
+    }
+
+    for name in [
+        "diff_load",
+        "layout_build_base",
+        "layout_refresh_notes",
+        "layout_build",
+        "first_frame",
+    ] {
+        if let Some(event) = events.iter().find(|event| event.name == name) {
+            lines.push(Line::from(format_debug_event(event, width)));
+        }
+    }
+
+    if !lines.is_empty() {
+        lines.push(Line::default());
+    }
+
+    for event in events.iter().take(5) {
+        lines.push(Line::from(format_debug_event(event, width)));
     }
 
     if lines.is_empty() {
@@ -421,8 +568,7 @@ fn format_debug_event(event: &log::Event, width: usize) -> String {
         .unwrap_or("?");
 
     let mut line = format!("{} {}ms", short_name(&event.name), elapsed_ms);
-    for (key, value) in event.fields.iter().filter(|(key, _)| key != "elapsed_ms") {
-        let fragment = format!(" {key}={value}");
+    for fragment in debug_fragments(event) {
         if line.len() + fragment.len() > width.max(12) {
             break;
         }
@@ -431,11 +577,57 @@ fn format_debug_event(event: &log::Event, width: usize) -> String {
     line
 }
 
+fn latest_field<'a>(events: &'a [log::Event], key: &str) -> Option<&'a str> {
+    events.iter().find_map(|event| {
+        event
+            .fields
+            .iter()
+            .find(|(field_key, _)| field_key == key)
+            .map(|(_, value)| value.as_str())
+    })
+}
+
+fn debug_fragments(event: &log::Event) -> Vec<String> {
+    if event.name == "layout_expand" {
+        let mut fragments = Vec::new();
+        for (key, short) in [
+            ("build_ms", "b"),
+            ("flatten_ms", "f"),
+            ("note_ms", "n"),
+            ("built_hunks", "bh"),
+            ("evicted_hunks", "eh"),
+            ("missing_hunks", "mh"),
+            ("extra_hunks", "xh"),
+        ] {
+            if let Some(value) = field_value(event, key) {
+                fragments.push(format!(" {short}={value}"));
+            }
+        }
+        return fragments;
+    }
+
+    event
+        .fields
+        .iter()
+        .filter(|(key, _)| key != "elapsed_ms")
+        .map(|(key, value)| format!(" {key}={value}"))
+        .collect()
+}
+
+fn field_value<'a>(event: &'a log::Event, key: &str) -> Option<&'a str> {
+    event
+        .fields
+        .iter()
+        .find(|(field_key, _)| field_key == key)
+        .map(|(_, value)| value.as_str())
+}
+
 fn short_name(name: &str) -> &str {
     match name {
         "layout_build_base" => "Base Layout",
         "layout_refresh_notes" => "Note Overlay",
         "layout_build" => "Total Layout",
+        "layout_expand" => "Expand",
         "diff_load" => "Diff Load",
         "first_frame" => "First Paint",
         _ => name,
@@ -451,4 +643,12 @@ fn row_view_state(app: &App, cursor_focused: bool) -> RowViewState {
         cursor_focused,
         selected_rows: app.selected_row_range(),
     }
+}
+
+fn row_index_for_context(
+    layout: &DiffLayout,
+    session: &crate::diff::DiffSession,
+    target: crate::layout::RowContext,
+) -> Option<usize> {
+    layout.row_index_for_context(session, target)
 }

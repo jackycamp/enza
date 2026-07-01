@@ -1,15 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Note {
     pub id: u64,
     pub target: NoteTarget,
     pub body: String,
-    pub created_at_ms: u128,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum NoteTarget {
     File {
@@ -35,14 +30,6 @@ pub enum NoteTarget {
 
 impl Note {
     pub fn new(id: u64, target: NoteTarget, body: String) -> Self {
-        Self {
-            id,
-            target,
-            body,
-            created_at_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0),
-        }
+        Self { id, target, body }
     }
 }

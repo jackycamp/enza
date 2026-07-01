@@ -19,8 +19,6 @@ pub struct SidebarEntry {
 pub struct SidebarState {
     pub open: bool,
     pub cursor: usize,
-    #[allow(dead_code)]
-    pub scroll: u16,
     pub collapsed_dirs: Vec<String>,
 }
 

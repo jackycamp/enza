@@ -1,5 +1,5 @@
-mod main_pane;
 mod global;
+mod main_pane;
 mod notes;
 mod root;
 mod selection;
