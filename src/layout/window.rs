@@ -1,15 +1,15 @@
 //! Loaded hunk management.
 //!
-//! The planner chooses which hunks around the selected hunk should have rendered
-//! rows loaded. The apply functions then build, queue, or unload hunk rows to
-//! match that choice. Row numbers come from `LayoutPlan`; this module only
-//! decides which hunk render rows are currently kept in memory.
+//! `HunkLoadPlan` chooses which hunks should have rendered rows loaded. The
+//! apply functions then build, queue, or unload hunk rows to match that choice.
+//! Row numbers come from `LayoutPlan`; this module only decides which hunk
+//! render rows are currently kept in memory.
 
 use crate::diff::DiffSession;
+use crate::layout::hunk_load_plan::HunkLoadPlan;
 use crate::layout::layout_tree::{CachedRows, HunkNode, LayoutTree, NodeStatus};
 use crate::layout::primitives::LayoutPlan;
 use crate::layout::primitives::LayoutWidths;
-use crate::layout::window_plan::LoadedHunkPlan;
 use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
 
 /// Selection and viewport inputs used to choose which hunks are loaded.
@@ -86,7 +86,6 @@ pub(super) struct LoadedHunkWindowRequest<'a> {
     pub plan: &'a LayoutPlan,
     pub worker: &'a LayoutWorker,
     pub generation: u64,
-    pub session: &'a DiffSession,
     pub widths: LayoutWidths,
     pub target: HunkWindowTarget,
     pub limits: LoadedHunkLimits,
@@ -116,12 +115,12 @@ pub(super) struct LoadedHunkUpdate {
 /// without waiting for the worker thread.
 pub(super) fn apply_loaded_hunk_window_sync(
     tree: &mut LayoutTree,
-    plan: &LayoutPlan,
+    layout_plan: &LayoutPlan,
     session: &DiffSession,
     widths: LayoutWidths,
     target: HunkWindowTarget,
 ) -> LoadedHunkUpdate {
-    let plan = LoadedHunkPlan::new(session, plan, target);
+    let plan = HunkLoadPlan::new(layout_plan, target);
     let mut changed = false;
     let mut built_hunks = 0usize;
     let mut built_rows = 0usize;
@@ -172,7 +171,7 @@ pub(super) fn apply_loaded_hunk_window(
     tree: &mut LayoutTree,
     request: LoadedHunkWindowRequest<'_>,
 ) -> LoadedHunkUpdate {
-    let plan = LoadedHunkPlan::new(request.session, request.plan, request.target);
+    let plan = HunkLoadPlan::new(request.plan, request.target);
     let mut changed = false;
     let mut built_hunks = 0usize;
     let mut evicted_hunks = 0usize;

@@ -27,6 +27,7 @@ use crate::log;
 use crate::note::Note;
 
 mod base_layout;
+mod hunk_load_plan;
 mod layout_tree;
 mod lines;
 mod notes;
@@ -36,7 +37,6 @@ mod primitives;
 mod tests;
 mod text;
 mod window;
-mod window_plan;
 mod worker;
 
 pub use layout_tree::NodeStatus;
@@ -167,7 +167,6 @@ impl Layout {
                 plan: &self.base.plan,
                 worker,
                 generation: self.target_state.generation,
-                session,
                 widths,
                 target,
                 limits: LoadedHunkLimits {

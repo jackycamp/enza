@@ -1,52 +1,49 @@
-//! Loaded hunk window planning.
+//! Hunk load planning.
 //!
 //! This module decides which hunk render caches should be resident for a target
 //! viewport and in which order missing hunks should be requested.
 
 use std::collections::HashSet;
 
-use crate::diff::DiffSession;
 use crate::layout::primitives::LayoutPlan;
 use crate::layout::window::HunkWindowTarget;
 use crate::layout::worker::HunkBuildKey;
 
-pub(super) struct LoadedHunkPlan {
-    desired: HashSet<(usize, usize)>,
+pub(super) struct HunkLoadPlan {
+    desired: HashSet<HunkBuildKey>,
     pub ordered: Vec<HunkBuildKey>,
 }
 
-impl LoadedHunkPlan {
+impl HunkLoadPlan {
     /// Chooses which hunks should have rendered rows loaded.
     ///
     /// Initial builds use the selected hunk as the anchor. Incremental updates
     /// use the visible base-row window so scheduling follows what is actually
     /// on screen.
-    pub(super) fn new(
-        session: &DiffSession,
-        layout_plan: &LayoutPlan,
-        target: HunkWindowTarget,
-    ) -> Self {
-        if let Some(visible_start_row) = target.visible_start_row {
-            return Self::for_visible_rows(layout_plan, target, visible_start_row);
+    pub(super) fn new(layout_plan: &LayoutPlan, target: HunkWindowTarget) -> Self {
+        let all_hunks = planned_hunks(layout_plan);
+        if all_hunks.is_empty() {
+            return Self::empty();
         }
 
-        Self::for_selected_hunk(session, target)
+        if let Some(visible_start_row) = target.visible_start_row {
+            return Self::for_visible_rows(
+                &all_hunks,
+                layout_plan.row_count,
+                target,
+                visible_start_row,
+            );
+        }
+
+        Self::for_selected_hunk(&all_hunks, target)
     }
 
     fn for_visible_rows(
-        layout_plan: &LayoutPlan,
+        all_hunks: &[PlannedHunkWindow],
+        row_count: usize,
         target: HunkWindowTarget,
         visible_start_row: usize,
     ) -> Self {
-        let all_hunks = planned_hunks(layout_plan);
-        if all_hunks.is_empty() {
-            return Self {
-                desired: HashSet::new(),
-                ordered: Vec::new(),
-            };
-        }
-
-        let row_count = layout_plan.row_count;
         let visible_start = visible_start_row.min(row_count);
         let visible_end = visible_start
             .saturating_add(target.viewport_rows)
@@ -55,52 +52,29 @@ impl LoadedHunkPlan {
         let overscan_end = visible_end
             .saturating_add(target.overscan_rows)
             .min(row_count);
-        let mut plan = Self {
-            desired: HashSet::new(),
-            ordered: Vec::new(),
-        };
+        let mut plan = Self::empty();
 
-        add_intersecting_hunks(&mut plan, &all_hunks, visible_start, visible_end);
-        add_intersecting_hunks(&mut plan, &all_hunks, overscan_start, visible_start);
-        add_intersecting_hunks(&mut plan, &all_hunks, visible_end, overscan_end);
+        add_intersecting_hunks(&mut plan, all_hunks, visible_start, visible_end);
+        add_intersecting_hunks(&mut plan, all_hunks, overscan_start, visible_start);
+        add_intersecting_hunks(&mut plan, all_hunks, visible_end, overscan_end);
 
         if plan.ordered.is_empty() {
-            add_selected_hunk(&mut plan, &all_hunks, target);
+            add_selected_hunk(&mut plan, all_hunks, target);
         }
 
         plan
     }
 
-    fn for_selected_hunk(session: &DiffSession, target: HunkWindowTarget) -> Self {
-        let all_hunks: Vec<(usize, usize, usize)> = session
-            .files
-            .iter()
-            .enumerate()
-            .flat_map(|(file_index, file)| {
-                file.hunks
-                    .iter()
-                    .enumerate()
-                    .map(move |(hunk_index, hunk)| (file_index, hunk_index, hunk.lines.len() + 2))
-            })
-            .collect();
-
-        if all_hunks.is_empty() {
-            return Self {
-                desired: HashSet::new(),
-                ordered: Vec::new(),
-            };
-        }
-
+    fn for_selected_hunk(all_hunks: &[PlannedHunkWindow], target: HunkWindowTarget) -> Self {
+        let selected_key = HunkBuildKey {
+            file_index: target.selected_file,
+            hunk_index: target.selected_hunk,
+        };
         let selected_index = all_hunks
             .iter()
-            .position(|&(file_index, hunk_index, _)| {
-                file_index == target.selected_file && hunk_index == target.selected_hunk
-            })
+            .position(|hunk| hunk.key == selected_key)
             .unwrap_or(0);
-        let mut plan = Self {
-            desired: HashSet::new(),
-            ordered: Vec::new(),
-        };
+        let mut plan = Self::empty();
         let mut before_rows = 0usize;
         let mut visible_after_rows = 0usize;
         let mut overscan_after_rows = 0usize;
@@ -115,7 +89,7 @@ impl LoadedHunkPlan {
 
         while visible_after_rows < visible_after_target {
             if !try_extend_down(
-                &all_hunks,
+                all_hunks,
                 &mut plan,
                 &mut visible_after_rows,
                 visible_after_target,
@@ -129,14 +103,14 @@ impl LoadedHunkPlan {
             let mut progressed = false;
 
             progressed |= try_extend_down(
-                &all_hunks,
+                all_hunks,
                 &mut plan,
                 &mut overscan_after_rows,
                 overscan_after_target,
                 &mut next_index,
             );
             progressed |= try_extend_up(
-                &all_hunks,
+                all_hunks,
                 &mut plan,
                 &mut before_rows,
                 before_target,
@@ -153,16 +127,31 @@ impl LoadedHunkPlan {
 
     /// Returns whether a hunk should have rendered rows loaded.
     pub fn contains(&self, file_index: usize, hunk_index: usize) -> bool {
-        self.desired.contains(&(file_index, hunk_index))
+        self.desired.contains(&HunkBuildKey {
+            file_index,
+            hunk_index,
+        })
+    }
+
+    fn empty() -> Self {
+        Self {
+            desired: HashSet::new(),
+            ordered: Vec::new(),
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 struct PlannedHunkWindow {
-    file_index: usize,
-    hunk_index: usize,
+    key: HunkBuildKey,
     start: usize,
     end: usize,
+}
+
+impl PlannedHunkWindow {
+    fn row_count(self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
 }
 
 fn planned_hunks(plan: &LayoutPlan) -> Vec<PlannedHunkWindow> {
@@ -170,8 +159,10 @@ fn planned_hunks(plan: &LayoutPlan) -> Vec<PlannedHunkWindow> {
         .iter()
         .flat_map(|file| {
             file.hunks.iter().map(|hunk| PlannedHunkWindow {
-                file_index: hunk.file_index,
-                hunk_index: hunk.hunk_index,
+                key: HunkBuildKey {
+                    file_index: hunk.file_index,
+                    hunk_index: hunk.hunk_index,
+                },
                 start: hunk.start,
                 end: hunk.start + hunk.line_count + 2,
             })
@@ -180,7 +171,7 @@ fn planned_hunks(plan: &LayoutPlan) -> Vec<PlannedHunkWindow> {
 }
 
 fn add_intersecting_hunks(
-    plan: &mut LoadedHunkPlan,
+    plan: &mut HunkLoadPlan,
     hunks: &[PlannedHunkWindow],
     start: usize,
     end: usize,
@@ -191,40 +182,39 @@ fn add_intersecting_hunks(
 
     for hunk in hunks {
         if hunk.end > start && hunk.start < end {
-            add_desired_key(plan, hunk.file_index, hunk.hunk_index);
+            add_desired_key(plan, hunk.key);
         }
     }
 }
 
 fn add_selected_hunk(
-    plan: &mut LoadedHunkPlan,
+    plan: &mut HunkLoadPlan,
     hunks: &[PlannedHunkWindow],
     target: HunkWindowTarget,
 ) {
-    if let Some(hunk) = hunks.iter().find(|hunk| {
-        hunk.file_index == target.selected_file && hunk.hunk_index == target.selected_hunk
-    }) {
-        add_desired_key(plan, hunk.file_index, hunk.hunk_index);
+    let selected_key = HunkBuildKey {
+        file_index: target.selected_file,
+        hunk_index: target.selected_hunk,
+    };
+    if let Some(hunk) = hunks.iter().find(|hunk| hunk.key == selected_key) {
+        add_desired_key(plan, hunk.key);
     }
 }
 
-fn add_desired_hunk(plan: &mut LoadedHunkPlan, hunk: (usize, usize, usize)) {
-    add_desired_key(plan, hunk.0, hunk.1);
+fn add_desired_hunk(plan: &mut HunkLoadPlan, hunk: PlannedHunkWindow) {
+    add_desired_key(plan, hunk.key);
 }
 
-fn add_desired_key(plan: &mut LoadedHunkPlan, file_index: usize, hunk_index: usize) {
-    if plan.desired.insert((file_index, hunk_index)) {
-        plan.ordered.push(HunkBuildKey {
-            file_index,
-            hunk_index,
-        });
+fn add_desired_key(plan: &mut HunkLoadPlan, key: HunkBuildKey) {
+    if plan.desired.insert(key) {
+        plan.ordered.push(key);
     }
 }
 
 /// Adds the next hunk after the selected range if more downward coverage is needed.
 fn try_extend_down(
-    all_hunks: &[(usize, usize, usize)],
-    plan: &mut LoadedHunkPlan,
+    all_hunks: &[PlannedHunkWindow],
+    plan: &mut HunkLoadPlan,
     covered_rows: &mut usize,
     target_rows: usize,
     next_index: &mut usize,
@@ -235,15 +225,15 @@ fn try_extend_down(
 
     let next = all_hunks[*next_index];
     add_desired_hunk(plan, next);
-    *covered_rows += next.2;
+    *covered_rows += next.row_count();
     *next_index += 1;
     true
 }
 
 /// Adds the previous hunk before the selected range if more upward coverage is needed.
 fn try_extend_up(
-    all_hunks: &[(usize, usize, usize)],
-    plan: &mut LoadedHunkPlan,
+    all_hunks: &[PlannedHunkWindow],
+    plan: &mut HunkLoadPlan,
     covered_rows: &mut usize,
     target_rows: usize,
     previous_index: &mut Option<usize>,
@@ -257,7 +247,7 @@ fn try_extend_up(
 
     let previous = all_hunks[index];
     add_desired_hunk(plan, previous);
-    *covered_rows += previous.2;
+    *covered_rows += previous.row_count();
     *previous_index = index.checked_sub(1);
     true
 }
@@ -272,8 +262,7 @@ mod tests {
     fn planner_expands_after_the_selected_hunk_to_cover_the_viewport() {
         let session = session_with_hunks(4);
         let layout_plan = LayoutPlan::new(&session);
-        let plan = LoadedHunkPlan::new(
-            &session,
+        let plan = HunkLoadPlan::new(
             &layout_plan,
             HunkWindowTarget {
                 selected_hunk: 1,
@@ -289,8 +278,7 @@ mod tests {
     fn planner_uses_overscan_on_both_sides() {
         let session = session_with_hunks(4);
         let layout_plan = LayoutPlan::new(&session);
-        let plan = LoadedHunkPlan::new(
-            &session,
+        let plan = HunkLoadPlan::new(
             &layout_plan,
             HunkWindowTarget {
                 selected_hunk: 1,
@@ -307,8 +295,7 @@ mod tests {
     fn planner_orders_visible_hunks_before_overscan() {
         let session = session_with_hunks(5);
         let layout_plan = LayoutPlan::new(&session);
-        let plan = LoadedHunkPlan::new(
-            &session,
+        let plan = HunkLoadPlan::new(
             &layout_plan,
             HunkWindowTarget {
                 selected_hunk: 2,
@@ -326,8 +313,7 @@ mod tests {
         let session = session_with_hunks(5);
         let layout_plan = LayoutPlan::new(&session);
         let visible_start = layout_plan.files[0].hunks[1].start;
-        let plan = LoadedHunkPlan::new(
-            &session,
+        let plan = HunkLoadPlan::new(
             &layout_plan,
             HunkWindowTarget {
                 selected_hunk: 4,
@@ -341,13 +327,17 @@ mod tests {
         assert_eq!(ordered_hunks(&plan), vec![(0, 1)]);
     }
 
-    fn desired_hunks(plan: &LoadedHunkPlan) -> Vec<(usize, usize)> {
-        let mut desired: Vec<_> = plan.desired.iter().copied().collect();
+    fn desired_hunks(plan: &HunkLoadPlan) -> Vec<(usize, usize)> {
+        let mut desired: Vec<_> = plan
+            .desired
+            .iter()
+            .map(|key| (key.file_index, key.hunk_index))
+            .collect();
         desired.sort_unstable();
         desired
     }
 
-    fn ordered_hunks(plan: &LoadedHunkPlan) -> Vec<(usize, usize)> {
+    fn ordered_hunks(plan: &HunkLoadPlan) -> Vec<(usize, usize)> {
         plan.ordered
             .iter()
             .map(|key| (key.file_index, key.hunk_index))
