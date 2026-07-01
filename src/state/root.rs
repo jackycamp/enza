@@ -42,7 +42,6 @@ impl App {
             sidebar: SidebarState {
                 open: true,
                 cursor: 0,
-                scroll: 0,
                 collapsed_dirs: Vec::new(),
             },
             notes: NoteState {

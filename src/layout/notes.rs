@@ -154,6 +154,7 @@ fn note_anchor_row(
                     .and_then(|index| session.files.get(index))
                     .is_some_and(|file| &file.path == file_path)
         }),
+
         NoteTarget::Hunk {
             file_path,
             hunk_header,
@@ -170,33 +171,59 @@ fn note_anchor_row(
                                 .is_some_and(|hunk| &hunk.header == hunk_header)
                     })
         }),
+
         NoteTarget::Line {
             file_path,
             old_lineno,
             new_lineno,
         } => row_contexts.iter().position(|context| {
-            matches!(context.kind, RowKind::DiffLine)
-                && context.old_lineno == *old_lineno
-                && context.new_lineno == *new_lineno
-                && context
-                    .file_index
-                    .and_then(|index| session.files.get(index))
-                    .is_some_and(|file| &file.path == file_path)
+            DiffLineAnchor::new(file_path, old_lineno, new_lineno).matches(session, context)
         }),
+
         NoteTarget::Range {
             file_path,
             start_old_lineno,
             start_new_lineno,
-            ..
-        } => row_contexts.iter().position(|context| {
-            matches!(context.kind, RowKind::DiffLine)
-                && context.old_lineno == *start_old_lineno
-                && context.new_lineno == *start_new_lineno
-                && context
-                    .file_index
-                    .and_then(|index| session.files.get(index))
-                    .is_some_and(|file| &file.path == file_path)
-        }),
+            end_old_lineno,
+            end_new_lineno,
+        } => {
+            let start_anchor = DiffLineAnchor::new(file_path, start_old_lineno, start_new_lineno);
+            let end_anchor = DiffLineAnchor::new(file_path, end_old_lineno, end_new_lineno);
+            let start = row_contexts
+                .iter()
+                .position(|context| start_anchor.matches(session, context))?;
+            row_contexts
+                .iter()
+                .any(|context| end_anchor.matches(session, context))
+                .then_some(start)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DiffLineAnchor<'a> {
+    file_path: &'a str,
+    old_lineno: Option<usize>,
+    new_lineno: Option<usize>,
+}
+
+impl<'a> DiffLineAnchor<'a> {
+    fn new(file_path: &'a str, old_lineno: &Option<usize>, new_lineno: &Option<usize>) -> Self {
+        Self {
+            file_path,
+            old_lineno: *old_lineno,
+            new_lineno: *new_lineno,
+        }
+    }
+
+    fn matches(self, session: &DiffSession, context: &RowContext) -> bool {
+        matches!(context.kind, RowKind::DiffLine)
+            && context.old_lineno == self.old_lineno
+            && context.new_lineno == self.new_lineno
+            && context
+                .file_index
+                .and_then(|index| session.files.get(index))
+                .is_some_and(|file| file.path == self.file_path)
     }
 }
 

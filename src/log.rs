@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::mem::size_of;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -97,33 +96,46 @@ pub fn current_rss_mb() -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
+type Integer = i32;
+#[cfg(target_os = "macos")]
+type Natural = u32;
+#[cfg(target_os = "macos")]
+type MachPort = u32;
+#[cfg(target_os = "macos")]
+type KernReturn = i32;
+#[cfg(target_os = "macos")]
+type MachMsgTypeNumber = u32;
+#[cfg(target_os = "macos")]
+type Policy = i32;
+#[cfg(target_os = "macos")]
+type MachVmSize = u64;
+
+#[cfg(target_os = "macos")]
+const KERN_SUCCESS: KernReturn = 0;
+#[cfg(target_os = "macos")]
+const MACH_TASK_BASIC_INFO: i32 = 20;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct TimeValue {
+    seconds: Integer,
+    microseconds: Integer,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct MachTaskBasicInfo {
+    virtual_size: MachVmSize,
+    resident_size: MachVmSize,
+    resident_size_max: MachVmSize,
+    user_time: TimeValue,
+    system_time: TimeValue,
+    policy: Policy,
+    suspend_count: Integer,
+}
+
+#[cfg(target_os = "macos")]
 fn current_rss_bytes() -> Option<u64> {
-    type Integer = i32;
-    type Natural = u32;
-    type MachPort = u32;
-    type KernReturn = i32;
-    type MachMsgTypeNumber = u32;
-    type Policy = i32;
-
-    const KERN_SUCCESS: KernReturn = 0;
-    const TASK_BASIC_INFO: i32 = 20;
-
-    #[repr(C)]
-    struct TimeValue {
-        seconds: Integer,
-        microseconds: Integer,
-    }
-
-    #[repr(C)]
-    struct TaskBasicInfo {
-        suspend_count: Integer,
-        virtual_size: usize,
-        resident_size: usize,
-        user_time: TimeValue,
-        system_time: TimeValue,
-        policy: Policy,
-    }
-
     unsafe extern "C" {
         fn mach_task_self() -> MachPort;
         fn task_info(
@@ -134,10 +146,10 @@ fn current_rss_bytes() -> Option<u64> {
         ) -> KernReturn;
     }
 
-    let mut info = TaskBasicInfo {
-        suspend_count: 0,
+    let mut info = MachTaskBasicInfo {
         virtual_size: 0,
         resident_size: 0,
+        resident_size_max: 0,
         user_time: TimeValue {
             seconds: 0,
             microseconds: 0,
@@ -147,22 +159,42 @@ fn current_rss_bytes() -> Option<u64> {
             microseconds: 0,
         },
         policy: 0,
+        suspend_count: 0,
     };
-    let mut count = (size_of::<TaskBasicInfo>() / size_of::<Natural>()) as MachMsgTypeNumber;
+    let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<Natural>())
+        as MachMsgTypeNumber;
 
     let result = unsafe {
         task_info(
             mach_task_self(),
-            TASK_BASIC_INFO,
-            (&mut info as *mut TaskBasicInfo).cast::<Integer>(),
+            MACH_TASK_BASIC_INFO,
+            (&mut info as *mut MachTaskBasicInfo).cast::<Integer>(),
             &mut count,
         )
     };
 
     if result == KERN_SUCCESS {
-        Some(info.resident_size as u64)
+        Some(info.resident_size)
     } else {
         None
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use std::mem::{offset_of, size_of};
+
+    use super::{MachTaskBasicInfo, current_rss_bytes};
+
+    #[test]
+    fn mach_task_basic_info_layout_matches_resident_size_offset() {
+        assert_eq!(offset_of!(MachTaskBasicInfo, resident_size), 8);
+        assert_eq!(size_of::<MachTaskBasicInfo>(), 48);
+    }
+
+    #[test]
+    fn macos_rss_query_returns_a_nonzero_value() {
+        assert!(current_rss_bytes().is_some_and(|bytes| bytes > 0));
     }
 }
 
