@@ -21,6 +21,8 @@ use ratatui::{
 use crate::diff::{DiffFilter, DiffSession, DiffTarget};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
+const BASELINE_PARTICLE_COUNT: usize = 32;
+const MAX_PARTICLE_COUNT: usize = 1024;
 
 const LOGO: &[&str] = &[
     " ______     __   __     ______     ______    ",
@@ -530,10 +532,10 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
 fn particle_count(stats: DiffStats) -> usize {
     let total_changes = stats.additions.saturating_add(stats.deletions);
     let scaled = (total_changes as f32).sqrt() as usize / 2;
-    8usize
+    BASELINE_PARTICLE_COUNT
         .saturating_add(stats.files)
         .saturating_add(scaled)
-        .clamp(10, 42)
+        .min(MAX_PARTICLE_COUNT)
 }
 
 fn seed_for_launch(stats: DiffStats) -> u64 {
@@ -808,5 +810,41 @@ fn centered_width(area: Rect, width: u16) -> Rect {
         y: area.y,
         width,
         height: area.height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BASELINE_PARTICLE_COUNT, DiffStats, MAX_PARTICLE_COUNT, particle_count};
+
+    #[test]
+    fn particle_count_keeps_a_baseline_for_clean_worktrees() {
+        assert_eq!(
+            particle_count(DiffStats::default()),
+            BASELINE_PARTICLE_COUNT
+        );
+    }
+
+    #[test]
+    fn particle_count_scales_with_changes_up_to_the_cap() {
+        assert_eq!(
+            particle_count(DiffStats {
+                files: 2,
+                additions: 16,
+                deletions: 0,
+                ..DiffStats::default()
+            }),
+            BASELINE_PARTICLE_COUNT + 4
+        );
+
+        assert_eq!(
+            particle_count(DiffStats {
+                files: 200,
+                additions: 10_000,
+                deletions: 10_000,
+                ..DiffStats::default()
+            }),
+            MAX_PARTICLE_COUNT
+        );
     }
 }
