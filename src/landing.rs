@@ -232,15 +232,15 @@ impl Particle {
         };
         let fade = (1.0 - (progress - 0.5).abs() * 2.0).clamp(0.0, 1.0);
         let pulse = ((self.age * 5.0 + self.pulse_offset).sin() + 1.0) * 0.5;
-        let intensity = (fade * 0.6 + pulse * 0.25).clamp(0.05, 0.75);
+        let intensity = (fade * 0.75 + pulse * 0.35).clamp(0.25, 1.0);
 
         let color = if self.glyph == '+' {
-            subtle_color((32, 70, 45), (76, 130, 92), intensity)
+            particle_color((58, 125, 75), (110, 220, 130), intensity)
         } else {
-            subtle_color((80, 34, 38), (140, 70, 72), intensity)
+            particle_color((130, 55, 60), (230, 100, 105), intensity)
         };
 
-        Style::default().fg(color).add_modifier(Modifier::DIM)
+        Style::default().fg(color)
     }
 }
 
@@ -589,7 +589,7 @@ fn spawn_particle(rng: &mut TinyRng, add_ratio: f32, area: Rect, fresh: bool) ->
     }
 }
 
-fn subtle_color(low: (u8, u8, u8), high: (u8, u8, u8), intensity: f32) -> Color {
+fn particle_color(low: (u8, u8, u8), high: (u8, u8, u8), intensity: f32) -> Color {
     let mix = |low: u8, high: u8| {
         low.saturating_add(((high.saturating_sub(low)) as f32 * intensity) as u8)
     };
@@ -839,9 +839,9 @@ mod tests {
 
         assert_eq!(
             particle_count(DiffStats {
-                files: 200,
-                additions: 10_000,
-                deletions: 10_000,
+                files: MAX_PARTICLE_COUNT.saturating_mul(2),
+                additions: 0,
+                deletions: 0,
                 ..DiffStats::default()
             }),
             MAX_PARTICLE_COUNT
