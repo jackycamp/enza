@@ -1,0 +1,812 @@
+use std::{
+    collections::HashSet,
+    io,
+    path::Path,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
+use git2::{BranchType, Repository};
+use ratatui::{
+    Frame, Terminal,
+    backend::Backend,
+    layout::{Alignment, Constraint, Direction, Layout as FrameLayout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+};
+
+use crate::diff::{DiffFilter, DiffSession, DiffTarget};
+
+const FRAME_INTERVAL: Duration = Duration::from_millis(50);
+
+const LOGO: &[&str] = &[
+    " ______     __   __     ______     ______    ",
+    "/\\  ___\\   /\\ \"-.\\ \\   /\\___  \\   /\\  __ \\   ",
+    "\\ \\  __\\   \\ \\ \\-.  \\  \\/_/  /__  \\ \\  __ \\  ",
+    " \\ \\_____\\  \\ \\_\\\\\"\\_\\   /\\_____\\  \\ \\_\\ \\_\\ ",
+    "  \\/_____/   \\/_/ \\/_/   \\/_____/   \\/_/\\/_/",
+];
+
+pub struct LandingSelection {
+    pub target: DiffTarget,
+    pub diff_filter: Option<DiffFilter>,
+}
+
+struct LandingApp {
+    suggestions: Vec<LandingSuggestion>,
+    selected: usize,
+    particles: ParticleField,
+}
+
+enum LandingAction {
+    Continue,
+    Quit,
+    Open(LandingSelection),
+}
+
+#[derive(Clone)]
+struct LandingSuggestion {
+    title: String,
+    command: String,
+    detail: String,
+    target: DiffTarget,
+    diff_filter: Option<DiffFilter>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DiffStats {
+    files: usize,
+    hunks: usize,
+    additions: usize,
+    deletions: usize,
+}
+
+struct ParticleField {
+    particles: Vec<Particle>,
+    rng: TinyRng,
+    add_ratio: f32,
+    area_size: Option<(u16, u16)>,
+}
+
+#[derive(Clone, Copy)]
+struct Particle {
+    glyph: char,
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    age: f32,
+    lifetime: f32,
+    pulse_offset: f32,
+}
+
+struct TinyRng {
+    state: u64,
+}
+
+pub fn run_landing_page<B: Backend>(
+    terminal: &mut Terminal<B>,
+    repo_path: &Path,
+) -> io::Result<Option<LandingSelection>> {
+    let mut app = LandingApp::new(repo_path);
+    let mut last_tick = Instant::now();
+
+    loop {
+        let now = Instant::now();
+        let dt = now.duration_since(last_tick).as_secs_f32().min(0.25);
+        last_tick = now;
+        app.tick(dt, terminal.get_frame().area());
+
+        terminal.draw(|frame| render(frame, &app))?;
+
+        if event::poll(FRAME_INTERVAL)? {
+            match handle_event(&mut app, event::read()?) {
+                LandingAction::Continue => {}
+                LandingAction::Quit => return Ok(None),
+                LandingAction::Open(selection) => return Ok(Some(selection)),
+            }
+        }
+    }
+}
+
+impl LandingApp {
+    fn new(repo_path: &Path) -> Self {
+        let worktree_stats = load_stats(repo_path, &DiffTarget::Worktree, None).unwrap_or_default();
+        Self {
+            suggestions: build_suggestions(repo_path, worktree_stats),
+            selected: 0,
+            particles: ParticleField::new(worktree_stats),
+        }
+    }
+
+    fn next(&mut self) {
+        if self.suggestions.is_empty() {
+            return;
+        }
+
+        self.selected = (self.selected + 1) % self.suggestions.len();
+    }
+
+    fn previous(&mut self) {
+        if self.suggestions.is_empty() {
+            return;
+        }
+
+        self.selected = if self.selected == 0 {
+            self.suggestions.len() - 1
+        } else {
+            self.selected - 1
+        };
+    }
+
+    fn select(&self) -> Option<LandingSelection> {
+        self.suggestions
+            .get(self.selected)
+            .map(|suggestion| LandingSelection {
+                target: suggestion.target.clone(),
+                diff_filter: suggestion.diff_filter.clone(),
+            })
+    }
+
+    fn tick(&mut self, dt: f32, area: Rect) {
+        self.particles.update(dt, area);
+    }
+}
+
+impl ParticleField {
+    fn new(stats: DiffStats) -> Self {
+        let total_changes = stats.additions.saturating_add(stats.deletions);
+        let count = particle_count(stats);
+        let add_ratio = if total_changes == 0 {
+            0.5
+        } else {
+            stats.additions as f32 / total_changes as f32
+        };
+
+        Self {
+            particles: vec![Particle::default(); count],
+            rng: TinyRng::new(seed_for_launch(stats)),
+            add_ratio,
+            area_size: None,
+        }
+    }
+
+    fn update(&mut self, dt: f32, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let area_size = (area.width, area.height);
+        if self.area_size != Some(area_size) {
+            self.area_size = Some(area_size);
+            for particle in &mut self.particles {
+                *particle = spawn_particle(&mut self.rng, self.add_ratio, area, true);
+            }
+            return;
+        }
+
+        for particle in &mut self.particles {
+            particle.age += dt;
+            particle.x += particle.dx * dt;
+            particle.y += particle.dy * dt;
+
+            if particle.age >= particle.lifetime || particle.outside(area) {
+                *particle = spawn_particle(&mut self.rng, self.add_ratio, area, false);
+            }
+        }
+    }
+}
+
+impl Default for Particle {
+    fn default() -> Self {
+        Self {
+            glyph: '+',
+            x: -1.0,
+            y: -1.0,
+            dx: 0.0,
+            dy: 0.0,
+            age: 1.0,
+            lifetime: 0.0,
+            pulse_offset: 0.0,
+        }
+    }
+}
+
+impl Particle {
+    fn outside(self, area: Rect) -> bool {
+        let max_x = area.width as f32 + 2.0;
+        let max_y = area.height as f32 + 2.0;
+        self.x < -2.0 || self.y < -2.0 || self.x > max_x || self.y > max_y
+    }
+
+    fn style(self) -> Style {
+        let progress = if self.lifetime <= 0.0 {
+            1.0
+        } else {
+            (self.age / self.lifetime).clamp(0.0, 1.0)
+        };
+        let fade = (1.0 - (progress - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+        let pulse = ((self.age * 5.0 + self.pulse_offset).sin() + 1.0) * 0.5;
+        let intensity = (fade * 0.6 + pulse * 0.25).clamp(0.05, 0.75);
+
+        let color = if self.glyph == '+' {
+            subtle_color((32, 70, 45), (76, 130, 92), intensity)
+        } else {
+            subtle_color((80, 34, 38), (140, 70, 72), intensity)
+        };
+
+        Style::default().fg(color).add_modifier(Modifier::DIM)
+    }
+}
+
+impl TinyRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed.max(1) }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.state >> 32) as u32
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        self.next_u32() as f32 / u32::MAX as f32
+    }
+
+    fn range_f32(&mut self, min: f32, max: f32) -> f32 {
+        min + (max - min) * self.next_f32()
+    }
+
+    fn chance(&mut self, probability: f32) -> bool {
+        self.next_f32() < probability
+    }
+}
+
+fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<LandingSuggestion> {
+    let mut suggestions = Vec::new();
+    let mut seen = HashSet::new();
+
+    push_worktree_suggestion(&mut suggestions, &mut seen, worktree_stats);
+    push_changed_suggestion(
+        &mut suggestions,
+        &mut seen,
+        repo_path,
+        "Review staged changes".to_string(),
+        "enza diff --cached".to_string(),
+        DiffTarget::Cached,
+        None,
+        "Staged for the next commit",
+    );
+
+    if let Ok(repo) = Repository::discover(repo_path) {
+        if let Some(upstream) = current_upstream(&repo) {
+            push_changed_suggestion(
+                &mut suggestions,
+                &mut seen,
+                repo_path,
+                "Review branch changes since upstream".to_string(),
+                format!("enza diff {upstream}...HEAD"),
+                DiffTarget::MergeBaseRange {
+                    base: upstream.clone(),
+                    head: "HEAD".to_string(),
+                },
+                None,
+                "Compared from the merge base with upstream",
+            );
+            push_changed_suggestion(
+                &mut suggestions,
+                &mut seen,
+                repo_path,
+                "Review unpushed commits".to_string(),
+                format!("enza diff {upstream}..HEAD"),
+                DiffTarget::Range {
+                    base: upstream.clone(),
+                    head: "HEAD".to_string(),
+                },
+                None,
+                "Commits on this branch that are not upstream",
+            );
+            push_changed_suggestion(
+                &mut suggestions,
+                &mut seen,
+                repo_path,
+                "Review incoming upstream changes".to_string(),
+                format!("enza diff HEAD..{upstream}"),
+                DiffTarget::Range {
+                    base: "HEAD".to_string(),
+                    head: upstream,
+                },
+                None,
+                "Upstream commits not in this branch",
+            );
+        }
+
+        for base in ["main", "master"] {
+            if revision_exists(&repo, base) {
+                push_changed_suggestion(
+                    &mut suggestions,
+                    &mut seen,
+                    repo_path,
+                    format!("Review branch changes since {base}"),
+                    format!("enza diff {base}...HEAD"),
+                    DiffTarget::MergeBaseRange {
+                        base: base.to_string(),
+                        head: "HEAD".to_string(),
+                    },
+                    None,
+                    &format!("Compared from the merge base with {base}"),
+                );
+            }
+        }
+
+        for (base, title, context) in [
+            (
+                "HEAD~1",
+                "Review the last commit",
+                "Changes introduced by the most recent commit",
+            ),
+            (
+                "HEAD~5",
+                "Review recent commits",
+                "Changes across the last five commits",
+            ),
+        ] {
+            if revision_exists(&repo, base) {
+                push_changed_suggestion(
+                    &mut suggestions,
+                    &mut seen,
+                    repo_path,
+                    title.to_string(),
+                    format!("enza diff {base}..HEAD"),
+                    DiffTarget::Range {
+                        base: base.to_string(),
+                        head: "HEAD".to_string(),
+                    },
+                    None,
+                    context,
+                );
+            }
+        }
+    }
+
+    for (filter, title, context) in [
+        (
+            "M",
+            "Review modified files only",
+            "Working tree files changed in place",
+        ),
+        (
+            "A",
+            "Review added files only",
+            "New or untracked working tree files",
+        ),
+        (
+            "D",
+            "Review deleted files only",
+            "Working tree files removed from disk",
+        ),
+    ] {
+        let Some(diff_filter) = DiffFilter::parse(filter) else {
+            continue;
+        };
+        push_changed_suggestion(
+            &mut suggestions,
+            &mut seen,
+            repo_path,
+            title.to_string(),
+            format!("enza diff --diff-filter {filter}"),
+            DiffTarget::Worktree,
+            Some(diff_filter),
+            context,
+        );
+    }
+
+    suggestions
+}
+
+fn push_worktree_suggestion(
+    suggestions: &mut Vec<LandingSuggestion>,
+    seen: &mut HashSet<String>,
+    stats: DiffStats,
+) {
+    let command = "enza diff".to_string();
+    if !seen.insert(command.clone()) {
+        return;
+    }
+
+    let detail = if stats.has_changes() {
+        format!("Changes not yet staged. {}", stats.summary())
+    } else {
+        "No working tree changes".to_string()
+    };
+
+    suggestions.push(LandingSuggestion {
+        title: "Review your working tree".to_string(),
+        command,
+        detail,
+        target: DiffTarget::Worktree,
+        diff_filter: None,
+    });
+}
+
+fn push_changed_suggestion(
+    suggestions: &mut Vec<LandingSuggestion>,
+    seen: &mut HashSet<String>,
+    repo_path: &Path,
+    title: String,
+    command: String,
+    target: DiffTarget,
+    diff_filter: Option<DiffFilter>,
+    context: &str,
+) {
+    if !seen.insert(command.clone()) {
+        return;
+    }
+
+    let Some(stats) = load_stats(repo_path, &target, diff_filter.as_ref()) else {
+        return;
+    };
+
+    if !stats.has_changes() {
+        return;
+    }
+
+    suggestions.push(LandingSuggestion {
+        title,
+        command,
+        detail: format!("{context}. {}", stats.summary()),
+        target,
+        diff_filter,
+    });
+}
+
+fn load_stats(
+    repo_path: &Path,
+    target: &DiffTarget,
+    diff_filter: Option<&DiffFilter>,
+) -> Option<DiffStats> {
+    let session = DiffSession::load_from_repo(repo_path, target, diff_filter).ok()?;
+    Some(stats_for_session(&session))
+}
+
+fn stats_for_session(session: &DiffSession) -> DiffStats {
+    let mut stats = DiffStats {
+        files: session.files.len(),
+        ..DiffStats::default()
+    };
+
+    for file in &session.files {
+        stats.hunks += file.hunks.len();
+        let (additions, deletions) = file.change_counts();
+        stats.additions += additions;
+        stats.deletions += deletions;
+    }
+
+    stats
+}
+
+fn current_upstream(repo: &Repository) -> Option<String> {
+    let head = repo.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+
+    let branch_name = head.shorthand()?;
+    let branch = repo.find_branch(branch_name, BranchType::Local).ok()?;
+    let upstream = branch.upstream().ok()?;
+    upstream.name().ok().flatten().map(str::to_string)
+}
+
+fn revision_exists(repo: &Repository, revision: &str) -> bool {
+    repo.revparse_single(revision).is_ok()
+}
+
+impl DiffStats {
+    fn has_changes(self) -> bool {
+        self.files > 0 || self.hunks > 0 || self.additions > 0 || self.deletions > 0
+    }
+
+    fn summary(self) -> String {
+        format!(
+            "{} {}, +{}, -{}",
+            self.files,
+            plural(self.files, "file", "files"),
+            self.additions,
+            self.deletions
+        )
+    }
+}
+
+fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
+}
+
+fn particle_count(stats: DiffStats) -> usize {
+    let total_changes = stats.additions.saturating_add(stats.deletions);
+    let scaled = (total_changes as f32).sqrt() as usize / 2;
+    8usize
+        .saturating_add(stats.files)
+        .saturating_add(scaled)
+        .clamp(10, 42)
+}
+
+fn seed_for_launch(stats: DiffStats) -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+
+    now ^ ((stats.files as u64) << 48) ^ ((stats.additions as u64) << 24) ^ (stats.deletions as u64)
+}
+
+fn spawn_particle(rng: &mut TinyRng, add_ratio: f32, area: Rect, fresh: bool) -> Particle {
+    let shooting = rng.chance(0.14);
+    let glyph = if rng.chance(add_ratio) { '+' } else { '-' };
+    let lifetime = if shooting {
+        rng.range_f32(1.0, 2.4)
+    } else {
+        rng.range_f32(4.0, 9.0)
+    };
+    let age = if fresh {
+        rng.range_f32(0.0, lifetime)
+    } else {
+        0.0
+    };
+
+    let (x, y, dx, dy) = if shooting {
+        (
+            rng.range_f32(-12.0, area.width as f32 * 0.7),
+            rng.range_f32(0.0, area.height as f32 * 0.75),
+            rng.range_f32(7.0, 16.0),
+            rng.range_f32(0.6, 2.4),
+        )
+    } else {
+        (
+            rng.range_f32(0.0, area.width.saturating_sub(1) as f32),
+            rng.range_f32(0.0, area.height.saturating_sub(1) as f32),
+            rng.range_f32(-0.7, 0.7),
+            rng.range_f32(-0.35, 0.35),
+        )
+    };
+
+    Particle {
+        glyph,
+        x,
+        y,
+        dx,
+        dy,
+        age,
+        lifetime,
+        pulse_offset: rng.range_f32(0.0, std::f32::consts::TAU),
+    }
+}
+
+fn subtle_color(low: (u8, u8, u8), high: (u8, u8, u8), intensity: f32) -> Color {
+    let mix = |low: u8, high: u8| {
+        low.saturating_add(((high.saturating_sub(low)) as f32 * intensity) as u8)
+    };
+
+    Color::Rgb(mix(low.0, high.0), mix(low.1, high.1), mix(low.2, high.2))
+}
+
+fn handle_event(app: &mut LandingApp, event: Event) -> LandingAction {
+    match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            handle_key_event(app, key)
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                app.next();
+                LandingAction::Continue
+            }
+            MouseEventKind::ScrollUp => {
+                app.previous();
+                LandingAction::Continue
+            }
+            _ => LandingAction::Continue,
+        },
+        _ => LandingAction::Continue,
+    }
+}
+
+fn handle_key_event(app: &mut LandingApp, key: KeyEvent) -> LandingAction {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('q') | KeyCode::Esc, _) => LandingAction::Quit,
+        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            LandingAction::Quit
+        }
+        (KeyCode::Char('j') | KeyCode::Down, _) => {
+            app.next();
+            LandingAction::Continue
+        }
+        (KeyCode::Char('k') | KeyCode::Up, _) => {
+            app.previous();
+            LandingAction::Continue
+        }
+        (KeyCode::Enter, _) => app
+            .select()
+            .map(LandingAction::Open)
+            .unwrap_or(LandingAction::Continue),
+        _ => LandingAction::Continue,
+    }
+}
+
+fn render(frame: &mut Frame<'_>, app: &LandingApp) {
+    let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black)),
+        area,
+    );
+
+    let content = centered_width(area, 88);
+    let suggestion_height = (app.suggestions.len() as u16)
+        .saturating_mul(3)
+        .saturating_add(2)
+        .clamp(4, 14);
+    let content_height = (LOGO.len() as u16)
+        .saturating_add(1)
+        .saturating_add(suggestion_height);
+    let top_padding = area.height.saturating_sub(content_height) / 2;
+    let foreground_area = Rect {
+        x: content.x,
+        y: content.y + top_padding,
+        width: content.width,
+        height: content_height,
+    };
+
+    render_particles(frame, area, foreground_area, &app.particles);
+
+    let chunks = FrameLayout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_padding),
+            Constraint::Length(LOGO.len() as u16),
+            Constraint::Length(1),
+            Constraint::Length(suggestion_height),
+            Constraint::Min(1),
+        ])
+        .split(content);
+
+    render_logo(frame, chunks[1]);
+    render_suggestions(frame, chunks[3], app);
+}
+
+fn render_particles(frame: &mut Frame<'_>, area: Rect, excluded: Rect, particles: &ParticleField) {
+    for particle in &particles.particles {
+        if particle.lifetime <= 0.0 {
+            continue;
+        }
+
+        render_particle_cell(
+            frame,
+            area,
+            excluded,
+            particle.x,
+            particle.y,
+            particle.glyph,
+            particle.style(),
+        );
+    }
+}
+
+fn render_particle_cell(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    excluded: Rect,
+    x: f32,
+    y: f32,
+    glyph: char,
+    style: Style,
+) {
+    let x = x.round();
+    let y = y.round();
+    if x < 0.0 || y < 0.0 || x >= area.width as f32 || y >= area.height as f32 {
+        return;
+    }
+
+    let x = area.x + x as u16;
+    let y = area.y + y as u16;
+    if rect_contains(excluded, x, y) {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(glyph.to_string()).style(style),
+        Rect {
+            x,
+            y,
+            width: 1,
+            height: 1,
+        },
+    );
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+fn render_logo(frame: &mut Frame<'_>, area: Rect) {
+    let lines = LOGO
+        .iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                *line,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(Color::Black)),
+        area,
+    );
+}
+
+fn render_suggestions(frame: &mut Frame<'_>, area: Rect, app: &LandingApp) {
+    let items = app
+        .suggestions
+        .iter()
+        .map(|suggestion| {
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    suggestion.title.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    suggestion.command.clone(),
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from(Span::styled(
+                    suggestion.detail.clone(),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(app.selected));
+
+    frame.render_stateful_widget(
+        List::new(items)
+            .style(Style::default().bg(Color::Black))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .style(Style::default().bg(Color::Black))
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .highlight_symbol("> ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        area,
+        &mut state,
+    );
+}
+
+fn centered_width(area: Rect, width: u16) -> Rect {
+    let width = width.min(area.width);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y,
+        width,
+        height: area.height,
+    }
+}

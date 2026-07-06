@@ -2,6 +2,7 @@ mod cli;
 mod diff;
 mod highlight;
 mod input;
+mod landing;
 mod layout;
 mod log;
 mod note;
@@ -9,7 +10,7 @@ mod render;
 mod state;
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
@@ -21,18 +22,33 @@ use crossterm::{
 use ratatui::{Terminal, prelude::CrosstermBackend};
 
 use crate::{
-    cli::Cli,
-    diff::DiffSession,
+    cli::{Cli, Command},
+    diff::{DiffFilter, DiffSession, DiffTarget},
     input::NavAction,
     state::{App, FocusPane},
 };
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    let diff_target = cli.diff_target().unwrap_or_else(|error| error.exit());
-    let diff_filter = cli.diff_filter().unwrap_or_else(|error| error.exit());
+    let repo_path = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
+    let direct_diff = match &cli.command {
+        Some(Command::Diff(args)) => Some((
+            args.diff_target().unwrap_or_else(|error| error.exit()),
+            args.diff_filter().unwrap_or_else(|error| error.exit()),
+        )),
+        None => None,
+    };
+
     let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal, &cli, &diff_target, diff_filter.as_ref());
+    let result = match direct_diff {
+        Some((diff_target, diff_filter)) => run_app(
+            &mut terminal,
+            &repo_path,
+            &diff_target,
+            diff_filter.as_ref(),
+        ),
+        None => run_landing_flow(&mut terminal, &repo_path),
+    };
     restore_terminal(&mut terminal)?;
     result
 }
@@ -56,11 +72,10 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    cli: &Cli,
-    diff_target: &crate::diff::DiffTarget,
-    diff_filter: Option<&crate::diff::DiffFilter>,
+    repo_path: &Path,
+    diff_target: &DiffTarget,
+    diff_filter: Option<&DiffFilter>,
 ) -> io::Result<()> {
-    let repo_path = cli.repo.as_deref().unwrap_or(Path::new("."));
     let mut diff_load = log::timer("diff_load");
     let session =
         DiffSession::load_from_repo(repo_path, diff_target, diff_filter).unwrap_or_default();
@@ -140,4 +155,20 @@ fn run_app(
     }
 
     Ok(())
+}
+
+fn run_landing_flow(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    repo_path: &Path,
+) -> io::Result<()> {
+    let Some(selection) = landing::run_landing_page(terminal, repo_path)? else {
+        return Ok(());
+    };
+
+    run_app(
+        terminal,
+        repo_path,
+        &selection.target,
+        selection.diff_filter.as_ref(),
+    )
 }
