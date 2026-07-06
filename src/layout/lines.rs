@@ -43,15 +43,8 @@ pub fn file_side_by_side_header_line(
 }
 
 /// Builds the inline-mode hunk header line.
-pub fn hunk_header_line(header: &str, selected: bool) -> Line<'static> {
-    let style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
+pub fn hunk_header_line(header: &str, _selected: bool) -> Line<'static> {
+    let style = Style::default().fg(Color::DarkGray);
     Line::from(vec![
         Span::styled(" ".repeat(INLINE_CODE_INDENT), Style::default()),
         Span::styled(display_hunk_header(header), style),
@@ -59,14 +52,8 @@ pub fn hunk_header_line(header: &str, selected: bool) -> Line<'static> {
 }
 
 /// Builds the side-by-side hunk header with the center gutter preserved.
-pub fn side_by_side_hunk_header_line(header: &str, selected: bool, width: usize) -> Line<'static> {
-    let style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+pub fn side_by_side_hunk_header_line(header: &str, _selected: bool, width: usize) -> Line<'static> {
+    let style = Style::default().fg(Color::DarkGray);
     let divider_style = Style::default().fg(Color::DarkGray);
     let (left_width, right_width) = split_side_by_side_width(width);
     let left = fit_text(
@@ -486,6 +473,17 @@ mod tests {
         assert!(
             side_by_side.starts_with(&format!("{}fn main", " ".repeat(SIDE_BY_SIDE_CODE_INDENT)))
         );
+    }
+
+    #[test]
+    fn selected_hunk_headers_do_not_change_text_style() {
+        let normal = hunk_header_line("@@ -12,7 +12,9 @@ fn main", false);
+        let selected = hunk_header_line("@@ -12,7 +12,9 @@ fn main", true);
+        assert_eq!(normal, selected);
+
+        let normal_side = side_by_side_hunk_header_line("@@ -12,7 +12,9 @@ fn main", false, 40);
+        let selected_side = side_by_side_hunk_header_line("@@ -12,7 +12,9 @@ fn main", true, 40);
+        assert_eq!(normal_side, selected_side);
     }
 
     #[test]
