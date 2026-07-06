@@ -9,6 +9,11 @@ use crate::diff::{DiffFile, DiffLine};
 use crate::highlight::{DiffKind, FileHighlighter};
 use crate::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
 
+const INLINE_CODE_INDENT: usize = 12;
+const SIDE_BY_SIDE_CODE_INDENT: usize = 7;
+const FILE_HEADER_BACKGROUND: Color = Color::Rgb(24, 30, 36);
+const SELECTED_FILE_HEADER_BACKGROUND: Color = Color::Rgb(35, 42, 50);
+
 /// Builds the horizontal separator row before a file header.
 pub fn file_separator_line(width: usize) -> Line<'static> {
     Line::from(Span::styled(
@@ -47,7 +52,10 @@ pub fn hunk_header_line(header: &str, selected: bool) -> Line<'static> {
         Style::default().fg(Color::DarkGray)
     };
 
-    Line::from(Span::styled(header.to_string(), style))
+    Line::from(vec![
+        Span::styled(" ".repeat(INLINE_CODE_INDENT), Style::default()),
+        Span::styled(display_hunk_header(header), style),
+    ])
 }
 
 /// Builds the side-by-side hunk header with the center gutter preserved.
@@ -61,7 +69,14 @@ pub fn side_by_side_hunk_header_line(header: &str, selected: bool, width: usize)
     };
     let divider_style = Style::default().fg(Color::DarkGray);
     let (left_width, right_width) = split_side_by_side_width(width);
-    let left = fit_text(header, left_width);
+    let left = fit_text(
+        &format!(
+            "{}{}",
+            " ".repeat(SIDE_BY_SIDE_CODE_INDENT),
+            display_hunk_header(header)
+        ),
+        left_width,
+    );
     let right = fit_text("", right_width);
 
     Line::from(vec![
@@ -69,6 +84,17 @@ pub fn side_by_side_hunk_header_line(header: &str, selected: bool, width: usize)
         Span::styled(" │ ".to_string(), divider_style),
         Span::styled(right, style),
     ])
+}
+
+fn display_hunk_header(header: &str) -> String {
+    let Some(rest) = header.strip_prefix("@@ ") else {
+        return header.to_string();
+    };
+    let Some((_, context)) = rest.split_once(" @@") else {
+        return header.to_string();
+    };
+
+    context.trim().to_string()
 }
 
 pub(super) struct InlineDiffLine<'a> {
@@ -167,21 +193,32 @@ pub fn split_side_by_side_width(width: usize) -> (usize, usize) {
 /// Builds the shared file header line with file label and change counts.
 fn header_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Line<'static> {
     let (additions, deletions) = file.change_counts();
+    let background = if selected {
+        SELECTED_FILE_HEADER_BACKGROUND
+    } else {
+        FILE_HEADER_BACKGROUND
+    };
     let title_style = if selected {
         Style::default()
             .fg(Color::White)
+            .bg(background)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
             .fg(Color::Gray)
+            .bg(background)
             .add_modifier(Modifier::BOLD)
     };
 
     let additions_style = Style::default()
         .fg(Color::Green)
+        .bg(background)
         .add_modifier(Modifier::BOLD);
-    let deletions_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    let divider_style = Style::default().fg(Color::DarkGray);
+    let deletions_style = Style::default()
+        .fg(Color::Red)
+        .bg(background)
+        .add_modifier(Modifier::BOLD);
+    let divider_style = Style::default().fg(Color::DarkGray).bg(background);
 
     let suffix = format!("+{additions}, -{deletions}");
     let available_label_width = width.saturating_sub(suffix.chars().count());
@@ -413,6 +450,89 @@ impl DiffLine {
         match self {
             Self::Context { new_lineno, .. } | Self::Added { new_lineno, .. } => Some(*new_lineno),
             Self::Removed { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FILE_HEADER_BACKGROUND, INLINE_CODE_INDENT, SELECTED_FILE_HEADER_BACKGROUND,
+        SIDE_BY_SIDE_CODE_INDENT, display_hunk_header, file_header_line, hunk_header_line,
+        side_by_side_hunk_header_line,
+    };
+    use crate::diff::{DiffFile, DiffHunk, DiffLine};
+    use ratatui::text::Line;
+
+    #[test]
+    fn hunk_headers_render_only_trailing_context() {
+        assert_eq!(display_hunk_header("@@ -12,7 +12,9 @@ fn main"), "fn main");
+        assert_eq!(display_hunk_header("@@ -0,0 +1,3 @@"), "");
+        assert_eq!(display_hunk_header("@@ -4 +4 @@"), "");
+    }
+
+    #[test]
+    fn hunk_headers_align_context_with_code_column() {
+        assert_eq!(
+            plain_text(hunk_header_line("@@ -12,7 +12,9 @@ fn main", false)),
+            format!("{}fn main", " ".repeat(INLINE_CODE_INDENT))
+        );
+
+        let side_by_side = plain_text(side_by_side_hunk_header_line(
+            "@@ -12,7 +12,9 @@ fn main",
+            false,
+            40,
+        ));
+        assert!(
+            side_by_side.starts_with(&format!("{}fn main", " ".repeat(SIDE_BY_SIDE_CODE_INDENT)))
+        );
+    }
+
+    #[test]
+    fn file_headers_apply_background_to_every_span() {
+        let file = sample_file();
+        let normal = file_header_line(&file, false, 40);
+        assert!(
+            normal
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(FILE_HEADER_BACKGROUND))
+        );
+
+        let selected = file_header_line(&file, true, 40);
+        assert!(
+            selected
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(SELECTED_FILE_HEADER_BACKGROUND))
+        );
+    }
+
+    fn plain_text(line: Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn sample_file() -> DiffFile {
+        DiffFile {
+            path: "src/main.rs".to_string(),
+            old_path: "src/main.rs".to_string(),
+            new_path: "src/main.rs".to_string(),
+            hunks: vec![DiffHunk {
+                header: "@@ -1,1 +1,1 @@".to_string(),
+                lines: vec![
+                    DiffLine::Removed {
+                        old_lineno: 1,
+                        text: "old".to_string(),
+                    },
+                    DiffLine::Added {
+                        new_lineno: 1,
+                        text: "new".to_string(),
+                    },
+                ],
+            }],
         }
     }
 }
