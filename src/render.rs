@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
+use crate::diff::FileChangeKind;
 use crate::layout::{
     HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
     RowViewState,
@@ -15,6 +16,10 @@ use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
 const OVERSCAN_MULTIPLIER: usize = 2;
+const SIDEBAR_MIN_WIDTH: u16 = 28;
+const SIDEBAR_MAX_WIDTH: u16 = 42;
+const MIN_DIFF_PANE_WIDTH: u16 = 32;
+const SIDEBAR_CHROME_WIDTH: u16 = 3;
 
 pub fn ensure_layout(app: &mut App, area: Rect) {
     let (inline_width, side_width) = render_widths(app, area);
@@ -180,7 +185,10 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let chunks = if app.sidebar.open {
         FrameLayout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(sidebar_width(app, area)),
+                Constraint::Min(1),
+            ])
             .split(area)
     } else {
         FrameLayout::default()
@@ -218,11 +226,12 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_sidebar_files(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows = app.visible_sidebar_entries();
+    let label_width = area.width.saturating_sub(SIDEBAR_CHROME_WIDTH) as usize;
     let items: Vec<ListItem<'_>> = rows
         .iter()
         .map(|row| {
             ListItem::new(Line::from(Span::styled(
-                row.label.clone(),
+                sidebar_entry_label(app, row, label_width),
                 sidebar_entry_style(app, row),
             )))
         })
@@ -449,11 +458,102 @@ fn content_area(app: &App, area: Rect) -> Rect {
     if app.sidebar.open {
         FrameLayout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(sidebar_width(app, area)),
+                Constraint::Min(1),
+            ])
             .split(area)[1]
     } else {
         area
     }
+}
+
+fn sidebar_width(app: &App, area: Rect) -> u16 {
+    let content_width = app
+        .visible_sidebar_entries()
+        .iter()
+        .map(|entry| entry.label.chars().count() as u16)
+        .max()
+        .unwrap_or(0);
+    fit_sidebar_width(area.width, content_width)
+}
+
+fn fit_sidebar_width(area_width: u16, content_width: u16) -> u16 {
+    let desired = content_width
+        .saturating_add(SIDEBAR_CHROME_WIDTH)
+        .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    let available = if area_width >= SIDEBAR_MIN_WIDTH.saturating_add(MIN_DIFF_PANE_WIDTH) {
+        area_width.saturating_sub(MIN_DIFF_PANE_WIDTH)
+    } else {
+        area_width / 2
+    };
+
+    desired.min(available)
+}
+
+fn sidebar_entry_label(app: &App, entry: &SidebarEntry, width: usize) -> String {
+    let SidebarEntryKind::File { file_index } = entry.kind else {
+        return truncate_middle(&entry.label, width);
+    };
+    let Some(file) = app.session.files.get(file_index) else {
+        return truncate_middle(&entry.label, width);
+    };
+
+    let indent = "  ".repeat(entry.depth + 1);
+    let status = match file.change_kind() {
+        FileChangeKind::Added => "A",
+        FileChangeKind::Modified => "M",
+    };
+    let suffix = format!("  {status}");
+    let fixed_width = indent.chars().count() + suffix.chars().count();
+    if fixed_width >= width {
+        return truncate_middle(&entry.label, width);
+    }
+
+    let file_name = file.path.rsplit('/').next().unwrap_or(file.path.as_str());
+    let file_name = truncate_filename(file_name, width - fixed_width);
+    format!("{indent}{file_name}{suffix}")
+}
+
+fn truncate_filename(file_name: &str, width: usize) -> String {
+    let Some((stem, extension)) = file_name.rsplit_once('.') else {
+        return truncate_middle(file_name, width);
+    };
+    if stem.is_empty() || extension.is_empty() {
+        return truncate_middle(file_name, width);
+    }
+
+    let extension = format!(".{extension}");
+    let extension_width = extension.chars().count();
+    if extension_width.saturating_add(2) > width {
+        return truncate_middle(file_name, width);
+    }
+
+    format!(
+        "{}{}",
+        truncate_middle(stem, width - extension_width),
+        extension
+    )
+}
+
+fn truncate_middle(text: &str, width: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+
+    let retained = width - 1;
+    let prefix_len = retained.div_ceil(2);
+    let suffix_len = retained / 2;
+    let prefix = chars[..prefix_len].iter().collect::<String>();
+    let suffix = chars[chars.len() - suffix_len..].iter().collect::<String>();
+    format!("{prefix}…{suffix}")
 }
 
 fn inner_pane_area(area: Rect) -> Rect {
@@ -651,4 +751,31 @@ fn row_index_for_context(
     target: crate::layout::RowContext,
 ) -> Option<usize> {
     layout.row_index_for_context(session, target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fit_sidebar_width, truncate_filename, truncate_middle};
+
+    #[test]
+    fn sidebar_expands_for_long_file_names_when_space_is_available() {
+        assert_eq!(fit_sidebar_width(80, 35), 38);
+        assert_eq!(fit_sidebar_width(80, 10), 28);
+        assert_eq!(fit_sidebar_width(50, 35), 25);
+    }
+
+    #[test]
+    fn truncated_file_names_preserve_the_extension() {
+        let file_name = truncate_filename("MarkdownEditorTextView.swift", 20);
+
+        assert_eq!(file_name.chars().count(), 20);
+        assert!(file_name.ends_with(".swift"));
+        assert!(file_name.contains('…'));
+    }
+
+    #[test]
+    fn middle_truncation_preserves_both_ends() {
+        assert_eq!(truncate_middle("MarkdownEditor", 9), "Mark…itor");
+        assert_eq!(truncate_middle("short", 9), "short");
+    }
 }
