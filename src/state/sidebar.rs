@@ -139,8 +139,8 @@ impl SidebarState {
             entries.push(SidebarEntry {
                 depth: parts.len().saturating_sub(1),
                 label: format!(
-                    "{}{}  {}",
-                    "  ".repeat(parts.len().saturating_sub(1) + 1),
+                    "{}{} {} ",
+                    "  ".repeat(parts.len().saturating_sub(1)),
                     file_name,
                     change_label
                 ),

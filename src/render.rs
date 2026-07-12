@@ -19,7 +19,9 @@ const OVERSCAN_MULTIPLIER: usize = 2;
 const SIDEBAR_MIN_WIDTH: u16 = 28;
 const SIDEBAR_MAX_WIDTH: u16 = 42;
 const MIN_DIFF_PANE_WIDTH: u16 = 32;
-const SIDEBAR_CHROME_WIDTH: u16 = 3;
+const SIDEBAR_CHROME_WIDTH: u16 = 2;
+const SIDEBAR_STATUS_RIGHT_PADDING: usize = 1;
+const SIDEBAR_CURSOR_BACKGROUND: Color = Color::Rgb(46, 46, 46);
 
 pub fn ensure_layout(app: &mut App, area: Rect) {
     let (inline_width, side_width) = render_widths(app, area);
@@ -229,24 +231,14 @@ fn render_sidebar_files(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let label_width = area.width.saturating_sub(SIDEBAR_CHROME_WIDTH) as usize;
     let items: Vec<ListItem<'_>> = rows
         .iter()
-        .map(|row| {
-            ListItem::new(Line::from(Span::styled(
-                sidebar_entry_label(app, row, label_width),
-                sidebar_entry_style(app, row),
-            )))
-        })
+        .map(|row| ListItem::new(sidebar_entry_line(app, row, label_width)))
         .collect();
 
     let mut state = ListState::default().with_selected(Some(app.sidebar.cursor));
 
     let list = List::new(items)
         .block(pane_block(" Files ", app.global.focus == FocusPane::Files))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol(if app.global.focus == FocusPane::Files {
-            ">"
-        } else {
-            "·"
-        });
+        .highlight_style(Style::default().bg(SIDEBAR_CURSOR_BACKGROUND));
 
     frame.render_stateful_widget(list, area, &mut state);
 }
@@ -499,20 +491,62 @@ fn sidebar_entry_label(app: &App, entry: &SidebarEntry, width: usize) -> String 
         return truncate_middle(&entry.label, width);
     };
 
-    let indent = "  ".repeat(entry.depth + 1);
     let status = match file.change_kind() {
         FileChangeKind::Added => "A",
         FileChangeKind::Modified => "M",
     };
-    let suffix = format!("  {status}");
-    let fixed_width = indent.chars().count() + suffix.chars().count();
-    if fixed_width >= width {
-        return truncate_middle(&entry.label, width);
+    let file_name = file.path.rsplit('/').next().unwrap_or(file.path.as_str());
+    sidebar_file_label(entry.depth, file_name, status, width)
+}
+
+fn sidebar_entry_line(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
+    let label = sidebar_entry_label(app, entry, width);
+    let base_style = sidebar_entry_style(app, entry);
+    let SidebarEntryKind::File { file_index } = entry.kind else {
+        return Line::from(Span::styled(label, base_style));
+    };
+    let Some(file) = app.session.files.get(file_index) else {
+        return Line::from(Span::styled(label, base_style));
+    };
+
+    let (status, color) = match file.change_kind() {
+        FileChangeKind::Added => ("A", Color::Green),
+        FileChangeKind::Modified => ("M", Color::Yellow),
+    };
+    let suffix = format!("{status}{}", " ".repeat(SIDEBAR_STATUS_RIGHT_PADDING));
+    let Some(leading) = label.strip_suffix(&suffix) else {
+        return Line::from(Span::styled(label, base_style));
+    };
+
+    Line::from(vec![
+        Span::styled(leading.to_string(), base_style),
+        Span::styled(
+            status.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(SIDEBAR_STATUS_RIGHT_PADDING), base_style),
+    ])
+}
+
+fn sidebar_file_label(depth: usize, file_name: &str, status: &str, width: usize) -> String {
+    let status_width = status.chars().count();
+    let status_area_width = status_width.saturating_add(SIDEBAR_STATUS_RIGHT_PADDING);
+    if status_area_width >= width {
+        return truncate_middle(status, width);
     }
 
-    let file_name = file.path.rsplit('/').next().unwrap_or(file.path.as_str());
+    let max_indent_width = width.saturating_sub(status_area_width + 1);
+    let indent_width = depth.saturating_mul(2).min(max_indent_width);
+    let indent = " ".repeat(indent_width);
+    let fixed_width = indent_width + status_area_width + 1;
     let file_name = truncate_filename(file_name, width - fixed_width);
-    format!("{indent}{file_name}{suffix}")
+    let padding =
+        width.saturating_sub(indent_width + file_name.chars().count() + status_area_width);
+    format!(
+        "{indent}{file_name}{}{status}{}",
+        " ".repeat(padding),
+        " ".repeat(SIDEBAR_STATUS_RIGHT_PADDING)
+    )
 }
 
 fn truncate_filename(file_name: &str, width: usize) -> String {
@@ -755,13 +789,26 @@ fn row_index_for_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_sidebar_width, truncate_filename, truncate_middle};
+    use super::{fit_sidebar_width, sidebar_file_label, truncate_filename, truncate_middle};
 
     #[test]
     fn sidebar_expands_for_long_file_names_when_space_is_available() {
-        assert_eq!(fit_sidebar_width(80, 35), 38);
+        assert_eq!(fit_sidebar_width(80, 33), 35);
         assert_eq!(fit_sidebar_width(80, 10), 28);
         assert_eq!(fit_sidebar_width(50, 35), 25);
+    }
+
+    #[test]
+    fn file_status_is_aligned_to_the_right_edge() {
+        let label = sidebar_file_label(1, "EditCardView.swift", "M", 32);
+
+        assert_eq!(label.chars().count(), 32);
+        assert!(label.starts_with("  EditCardView.swift"));
+        assert!(label.ends_with("M "));
+
+        let deeply_nested = sidebar_file_label(20, "file.swift", "A", 8);
+        assert_eq!(deeply_nested.chars().count(), 8);
+        assert!(deeply_nested.ends_with("A "));
     }
 
     #[test]
