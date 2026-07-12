@@ -493,6 +493,7 @@ fn sidebar_entry_label(app: &App, entry: &SidebarEntry, width: usize) -> String 
 
     let status = match file.change_kind() {
         FileChangeKind::Added => "A",
+        FileChangeKind::Deleted => "D",
         FileChangeKind::Modified => "M",
     };
     let file_name = file.path.rsplit('/').next().unwrap_or(file.path.as_str());
@@ -511,6 +512,7 @@ fn sidebar_entry_line(app: &App, entry: &SidebarEntry, width: usize) -> Line<'st
 
     let (status, color) = match file.change_kind() {
         FileChangeKind::Added => ("A", Color::Green),
+        FileChangeKind::Deleted => ("D", Color::Red),
         FileChangeKind::Modified => ("M", Color::Yellow),
     };
     let suffix = format!("{status}{}", " ".repeat(SIDEBAR_STATUS_RIGHT_PADDING));

@@ -32,6 +32,7 @@ pub struct DiffFile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileChangeKind {
     Added,
+    Deleted,
     Modified,
 }
 
@@ -140,6 +141,10 @@ impl DiffFilter {
 
 impl DiffFile {
     pub fn change_kind(&self) -> FileChangeKind {
+        if self.new_path == "/dev/null" {
+            return FileChangeKind::Deleted;
+        }
+
         if self.old_path == "/dev/null" {
             return FileChangeKind::Added;
         }
@@ -391,4 +396,27 @@ fn synthetic_added_file_hunk(
         header: format!("@@ -0,0 +1,{} @@", lines.len()),
         lines,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DiffFile, DiffHunk, DiffLine, FileChangeKind};
+
+    #[test]
+    fn deleted_files_are_classified_separately_from_modified_files() {
+        let file = DiffFile {
+            path: "src/removed.rs".to_string(),
+            old_path: "src/removed.rs".to_string(),
+            new_path: "/dev/null".to_string(),
+            hunks: vec![DiffHunk {
+                header: "@@ -1 +0,0 @@".to_string(),
+                lines: vec![DiffLine::Removed {
+                    old_lineno: 1,
+                    text: "removed".to_string(),
+                }],
+            }],
+        };
+
+        assert_eq!(file.change_kind(), FileChangeKind::Deleted);
+    }
 }

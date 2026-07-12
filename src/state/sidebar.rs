@@ -133,6 +133,7 @@ impl SidebarState {
             let file_name = parts.last().copied().unwrap_or(file.path.as_str());
             let change_label = match file.change_kind() {
                 FileChangeKind::Added => "A",
+                FileChangeKind::Deleted => "D",
                 FileChangeKind::Modified => "M",
             };
 
