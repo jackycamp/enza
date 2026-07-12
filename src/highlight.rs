@@ -9,7 +9,7 @@ use syntect::{
     parsing::{SyntaxReference, SyntaxSet},
 };
 
-static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
+static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(two_face::syntax::extra_newlines);
 static THEME: Lazy<Theme> = Lazy::new(|| {
     ThemeSet::load_defaults()
         .themes
@@ -73,7 +73,16 @@ fn is_supported_path(path: &str) -> bool {
         .map(|ext| {
             matches!(
                 ext,
-                "rs" | "js" | "ts" | "sh" | "bash" | "md" | "markdown" | "html" | "css" | "json"
+                "rs" | "js"
+                    | "ts"
+                    | "sh"
+                    | "bash"
+                    | "md"
+                    | "markdown"
+                    | "html"
+                    | "css"
+                    | "json"
+                    | "swift"
             )
         })
         .unwrap_or(false)
@@ -100,4 +109,23 @@ fn plain_span(text: &str, background: Option<Color>) -> Span<'static> {
     }
 
     Span::styled(text.to_string(), style)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileHighlighter, syntax_for_path};
+    use crate::highlight::DiffKind;
+
+    #[test]
+    fn swift_files_use_syntax_highlighting() {
+        assert!(syntax_for_path("Sources/App/main.swift").is_some());
+
+        let mut highlighter = FileHighlighter::new("Sources/App/main.swift");
+        let spans = highlighter.highlight_line("let value = String()", DiffKind::Context);
+
+        assert!(
+            spans.iter().any(|span| span.style.fg.is_some()),
+            "expected Swift highlighting to produce styled spans"
+        );
+    }
 }
