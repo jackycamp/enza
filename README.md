@@ -2,6 +2,25 @@
 
 A fast and light TUI diff viewer.
 
+## Quick start
+
+```bash
+# Install from source
+cargo install --git https://github.com/jackycamp/enza.git --root ~/.local
+
+# Show help
+enza -h
+
+# Navigate to a repo on your machine
+cd ~/some/project
+
+# Show the diff
+enza diff
+
+# Alternatively, launch enza and choose a suggestion.
+enza
+```
+
 ## Install
 
 ### Install with script
@@ -43,40 +62,9 @@ Prebuilt release archives, when available, can be downloaded from:
 https://github.com/jackycamp/enza/releases
 ```
 
-## Quick start
+## Features and Usage
 
-From a Git repository:
-
-```sh
-enza
-```
-
-This opens the landing page with suggested diffs for the current repo.
-
-To jump straight into a diff:
-
-```sh
-enza diff
-enza diff --cached
-enza diff main...HEAD
-enza diff HEAD~1..HEAD
-```
-
-If you are running from a source checkout instead of an installed binary, prefix commands with `cargo run --`:
-
-```sh
-cargo run
-cargo run -- diff
-cargo run -- diff main...HEAD
-```
-
-Useful options:
-
-```sh
-enza --repo /path/to/repo
-enza diff --diff-filter M
-enza diff --diff-filter AM main...HEAD
-```
+TODO
 
 ## Build and run on macOS
 
