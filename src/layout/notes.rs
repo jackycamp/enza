@@ -11,7 +11,8 @@ use crate::layout::primitives::{
     HunkRange, LayoutWidths, NoteInsertion, RenderRow, RowContext, RowKind,
 };
 use crate::layout::text::{fit_text, truncate_with_ellipsis, wrap_text};
-use crate::note::{Note, NoteTarget};
+use crate::mention_style::{styled_mentions, styled_note_text};
+use crate::note::{AGENT_ACTIVITY_INTERVAL, AgentStatus, MessageAuthor, Note, NoteTarget};
 
 pub(super) struct NoteOverlay {
     pub insertions: Vec<NoteInsertion>,
@@ -63,7 +64,11 @@ pub fn build_note_anchors<'a>(
 
 pub fn build_note_rows(note: &Note, width: usize, expanded: bool) -> Vec<String> {
     let body_width = width.saturating_sub(4).max(8);
-    let mut rows = wrap_text(&note.body, body_width);
+    if note.is_agent_thread() {
+        return build_agent_note_rows(note, body_width, expanded);
+    }
+
+    let mut rows = wrap_note_body(note.personal_body().unwrap_or_default(), body_width);
     if rows.is_empty() {
         rows.push(String::new());
     }
@@ -78,24 +83,225 @@ pub fn build_note_rows(note: &Note, width: usize, expanded: bool) -> Vec<String>
     rows
 }
 
-pub fn render_note_rows(rows: &[String], width: usize) -> Vec<Line<'static>> {
+fn build_agent_note_rows(note: &Note, width: usize, expanded: bool) -> Vec<String> {
+    if !expanded {
+        return build_collapsed_agent_rows(note, width);
+    }
+
+    let mut rows = Vec::new();
+    for message in &note.messages {
+        if !rows.is_empty() {
+            rows.push(String::new());
+        }
+        let author = match message.author {
+            MessageAuthor::User => "You:",
+            MessageAuthor::Agent(provider) => match provider {
+                crate::note::AgentProvider::Codex => "Codex:",
+                crate::note::AgentProvider::Claude => "Claude:",
+            },
+        };
+        rows.push(author.to_string());
+        rows.extend(wrap_note_body(&message.body, width));
+    }
+
+    append_agent_status_rows(note, width, &mut rows);
+    rows.push(agent_action_hint(note, true));
+    if note.agent.as_ref().is_some_and(|agent| agent.composer_open) {
+        rows.extend([String::new(), String::new(), String::new()]);
+    }
+    rows
+}
+
+fn build_collapsed_agent_rows(note: &Note, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    if let Some(agent) = &note.agent
+        && !matches!(agent.status, AgentStatus::Complete)
+    {
+        if let Some(latest_user) = note
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.author == MessageAuthor::User)
+        {
+            rows.push(message_summary("You", &latest_user.body, width));
+        }
+        rows.push(agent_status_summary(&agent.status));
+        if note.messages.len() > 1 {
+            rows.push(format!("{} earlier messages", note.messages.len() - 1));
+        }
+        rows.push(agent_action_hint(note, false));
+        return rows;
+    }
+
+    if let Some(first_user) = note
+        .messages
+        .iter()
+        .find(|message| message.author == MessageAuthor::User)
+    {
+        rows.push(message_summary("You", &first_user.body, width));
+    }
+
+    let latest_agent = note.messages.iter().rev().find_map(|message| {
+        let MessageAuthor::Agent(provider) = message.author else {
+            return None;
+        };
+        Some((provider, message))
+    });
+    if let Some((provider, message)) = latest_agent {
+        rows.push(message_summary(provider.label(), &message.body, width));
+    } else if let Some(agent) = &note.agent {
+        rows.push(agent_status_summary(&agent.status));
+    }
+
+    if note.messages.len() > 2 {
+        rows.push(format!("{} more messages", note.messages.len() - 2));
+    }
+
+    rows.push(agent_action_hint(note, false));
+
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+fn append_agent_status_rows(note: &Note, width: usize, rows: &mut Vec<String>) {
+    let Some(agent) = &note.agent else {
+        return;
+    };
+    match &agent.status {
+        AgentStatus::Queued | AgentStatus::Running { .. } => {
+            rows.push(String::new());
+            rows.push(agent_status_summary(&agent.status));
+        }
+        AgentStatus::Failed(failure) => {
+            rows.push(String::new());
+            rows.push("Enza".to_string());
+            rows.extend(wrap_note_body(&failure.message, width));
+        }
+        AgentStatus::Cancelled => {
+            rows.push(String::new());
+            rows.push("Enza".to_string());
+            rows.push("The agent request was cancelled.".to_string());
+        }
+        AgentStatus::Complete => {}
+    }
+}
+
+fn agent_status_summary(status: &AgentStatus) -> String {
+    match status {
+        AgentStatus::Queued => "Waiting to start…".to_string(),
+        AgentStatus::Running {
+            started_at,
+            slow: true,
+        } => format!(
+            "{} Still responding · {}m",
+            agent_activity_glyph(started_at.elapsed()),
+            started_at.elapsed().as_secs().div_ceil(60)
+        ),
+        AgentStatus::Running { started_at, .. } => {
+            format!("{} Responding…", agent_activity_glyph(started_at.elapsed()))
+        }
+        AgentStatus::Complete => "Answered".to_string(),
+        AgentStatus::Failed(failure) if failure.retryable => {
+            "Agent request failed · r to retry".to_string()
+        }
+        AgentStatus::Failed(_) => "Agent request failed".to_string(),
+        AgentStatus::Cancelled => "Agent request cancelled · r to retry".to_string(),
+    }
+}
+
+fn agent_action_hint(note: &Note, expanded: bool) -> String {
+    if note.agent.as_ref().is_some_and(|agent| agent.composer_open) {
+        return "Enter to send · Esc to cancel".to_string();
+    }
+    let toggle = if expanded {
+        "Enter to collapse"
+    } else {
+        "Enter to expand"
+    };
+    let Some(agent) = &note.agent else {
+        return toggle.to_string();
+    };
+    let action = match &agent.status {
+        AgentStatus::Queued | AgentStatus::Running { .. } => Some("c to cancel"),
+        AgentStatus::Complete if agent.session_id.is_some() => Some("n to reply"),
+        AgentStatus::Failed(failure) if failure.retryable => Some("r to retry"),
+        AgentStatus::Cancelled => Some("r to retry"),
+        _ => None,
+    };
+    action.map_or_else(
+        || toggle.to_string(),
+        |action| format!("{toggle} · {action}"),
+    )
+}
+
+fn agent_activity_glyph(elapsed: std::time::Duration) -> &'static str {
+    let phase = elapsed.as_millis() / AGENT_ACTIVITY_INTERVAL.as_millis();
+    if phase.is_multiple_of(2) { "+" } else { "−" }
+}
+
+fn message_summary(author: &str, body: &str, width: usize) -> String {
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_with_ellipsis(&format!("{author}: {body}"), width)
+}
+
+fn wrap_note_body(body: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            rows.push(String::new());
+            continue;
+        }
+        rows.extend(wrap_text(line, width));
+    }
+    rows
+}
+
+pub fn render_note_rows(note: &Note, rows: &[String], width: usize) -> Vec<Line<'static>> {
     let inner_width = width.saturating_sub(2).max(4);
     let border_style = Style::default().fg(Color::DarkGray);
     let content_style = Style::default().fg(Color::White);
     let mut rendered = Vec::with_capacity(rows.len() + 2);
 
-    rendered.push(Line::from(vec![
-        Span::styled("┌".to_string(), border_style),
-        Span::styled("─".repeat(inner_width), border_style),
-        Span::styled("┐".to_string(), border_style),
-    ]));
+    let title = note.agent.as_ref().map(|agent| {
+        format!(
+            "{} · {}",
+            agent.provider.mention(),
+            match &agent.status {
+                AgentStatus::Queued => "queued",
+                AgentStatus::Running { slow: false, .. } => "responding",
+                AgentStatus::Running { slow: true, .. } => "still responding",
+                AgentStatus::Complete => "answered",
+                AgentStatus::Failed(failure)
+                    if failure.kind == crate::note::AgentFailureKind::Timeout =>
+                    "timed out",
+                AgentStatus::Failed(_) => "failed",
+                AgentStatus::Cancelled => "cancelled",
+            }
+        )
+    });
+    let top = match title {
+        Some(title) => {
+            let title = truncate_with_ellipsis(&format!("─ {title} "), inner_width);
+            format!(
+                "{title}{}",
+                "─".repeat(inner_width.saturating_sub(title.chars().count()))
+            )
+        }
+        None => "─".repeat(inner_width),
+    };
+    let mut top_spans = vec![Span::styled("┌".to_string(), border_style)];
+    top_spans.extend(styled_mentions(&top, border_style));
+    top_spans.push(Span::styled("┐".to_string(), border_style));
+    rendered.push(Line::from(top_spans));
 
     for row in rows {
-        rendered.push(Line::from(vec![
-            Span::styled("│".to_string(), border_style),
-            Span::styled(fit_text(&format!(" {row}"), inner_width), content_style),
-            Span::styled("│".to_string(), border_style),
-        ]));
+        let content = fit_text(&format!(" {row}"), inner_width);
+        let mut spans = vec![Span::styled("│".to_string(), border_style)];
+        spans.extend(styled_note_text(&content, content_style));
+        spans.push(Span::styled("│".to_string(), border_style));
+        rendered.push(Line::from(spans));
     }
 
     rendered.push(Line::from(vec![
@@ -114,7 +320,7 @@ pub fn render_side_by_side_note_rows(
 ) -> Vec<Line<'static>> {
     let side = note_side_impl(note);
     if side == NoteSide::Full {
-        return render_note_rows(rows, width);
+        return render_note_rows(note, rows, width);
     }
 
     let (left_width, right_width) = split_side_by_side_width(width);
@@ -123,7 +329,7 @@ pub fn render_side_by_side_note_rows(
         NoteSide::Right => right_width,
         NoteSide::Full => width,
     };
-    let note_rows = render_note_rows(rows, note_width);
+    let note_rows = render_note_rows(note, rows, note_width);
     let divider_style = Style::default().fg(Color::DarkGray);
 
     note_rows
@@ -257,6 +463,16 @@ fn note_side_impl(note: &Note) -> NoteSide {
     }
 }
 
+fn note_wrap_width(note: &Note, widths: LayoutWidths) -> usize {
+    let (left_width, right_width) = split_side_by_side_width(widths.side_by_side);
+    let side_by_side_note_width = match note_side_impl(note) {
+        NoteSide::Full => widths.side_by_side,
+        NoteSide::Left => left_width,
+        NoteSide::Right => right_width,
+    };
+    widths.inline.min(side_by_side_note_width)
+}
+
 struct NoteInsertions {
     insertions: Vec<NoteInsertion>,
     inserted_before_or_at_base: Vec<usize>,
@@ -278,8 +494,6 @@ impl NoteInsertions {
         let mut insertions = Vec::new();
         let mut inserted_before_or_at_base = vec![0usize; request.base.plan.row_count + 1];
         let mut inserted_total = 0usize;
-        let note_wrap_width = request.widths.inline.min(request.widths.side_by_side);
-
         for base_index in 0..request.base.plan.row_count {
             for note in note_anchors
                 .iter()
@@ -287,7 +501,8 @@ impl NoteInsertions {
                 .map(|(_, note)| note)
             {
                 let expanded = request.expanded_note_ids.contains(&note.id);
-                let note_rows = build_note_rows(note, note_wrap_width, expanded);
+                let note_rows =
+                    build_note_rows(note, note_wrap_width(note, request.widths), expanded);
                 let context = RowContext::note(base_row_contexts[base_index], note.id);
 
                 let insertion = build_note_insertion(NoteInsertionRequest {
@@ -323,7 +538,7 @@ struct NoteInsertionRequest<'a> {
 fn build_note_insertion(request: NoteInsertionRequest<'_>) -> NoteInsertion {
     NoteInsertion {
         base_index: request.base_index,
-        inline_rows: render_note_rows(request.note_rows, request.widths.inline)
+        inline_rows: render_note_rows(request.note, request.note_rows, request.widths.inline)
             .into_iter()
             .map(RenderRow::note)
             .collect(),
@@ -428,6 +643,142 @@ mod tests {
         assert_eq!(collapsed.len(), 2);
         assert!(collapsed.last().unwrap().ends_with('…'));
         assert!(expanded.len() > collapsed.len());
+    }
+
+    #[test]
+    fn agent_threads_show_latest_activity_when_collapsed_and_all_messages_when_expanded() {
+        let mut note = Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            crate::note::AgentProvider::Codex,
+            "Why is this needed?".to_string(),
+            1,
+        );
+        note.push_agent_message(
+            crate::note::AgentProvider::Codex,
+            "It protects the shared queue.".to_string(),
+        );
+        note.push_user_message("Does it cover the worker too?".to_string());
+        note.push_agent_message(
+            crate::note::AgentProvider::Codex,
+            "No, the guard is released first.".to_string(),
+        );
+        note.agent.as_mut().unwrap().status = AgentStatus::Complete;
+        note.agent.as_mut().unwrap().session_id = Some("session-1".to_string());
+
+        let collapsed = build_note_rows(&note, 60, false);
+        let expanded = build_note_rows(&note, 60, true);
+
+        assert_eq!(collapsed[0], "You: Why is this needed?");
+        assert_eq!(collapsed[1], "Codex: No, the guard is released first.");
+        assert_eq!(collapsed[2], "2 more messages");
+        assert_eq!(collapsed[3], "Enter to expand · n to reply");
+        assert_eq!(expanded.last().unwrap(), "Enter to collapse · n to reply");
+        assert_eq!(
+            expanded.iter().filter(|row| row.as_str() == "You:").count(),
+            2
+        );
+        assert_eq!(
+            expanded
+                .iter()
+                .filter(|row| row.as_str() == "Codex:")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn expanded_agent_reply_keeps_the_end_of_a_wrapped_response() {
+        let mut note = Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            crate::note::AgentProvider::Codex,
+            "Explain this".to_string(),
+            1,
+        );
+        note.push_agent_message(
+            crate::note::AgentProvider::Codex,
+            "This response wraps across several lines and still reaches THE_END".to_string(),
+        );
+        note.agent.as_mut().unwrap().status = AgentStatus::Complete;
+
+        let collapsed = build_note_rows(&note, 24, false);
+        let expanded = build_note_rows(&note, 24, true);
+
+        assert!(collapsed.iter().any(|row| row.contains("Enter to expand")));
+        assert!(expanded.iter().any(|row| row.contains("THE_END")));
+    }
+
+    #[test]
+    fn one_sided_agent_reply_wraps_to_its_side_by_side_card_width() {
+        let mut note = Note::new_agent(
+            1,
+            NoteTarget::Line {
+                file_path: "test.rs".to_string(),
+                old_lineno: None,
+                new_lineno: Some(2),
+            },
+            crate::note::AgentProvider::Codex,
+            "What does this do?".to_string(),
+            1,
+        );
+        note.push_agent_message(
+            crate::note::AgentProvider::Codex,
+            "This response is longer than one side of the diff but must wrap and retain THE_END"
+                .to_string(),
+        );
+        note.agent.as_mut().unwrap().status = AgentStatus::Complete;
+        let widths = LayoutWidths {
+            inline: 80,
+            side_by_side: 80,
+        };
+
+        let rows = build_note_rows(&note, note_wrap_width(&note, widths), true);
+        let rendered = render_side_by_side_note_rows(&rows, widths.side_by_side, &note);
+        let rendered_text = rendered
+            .iter()
+            .map(plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rows.iter().any(|row| row.contains("THE_END")));
+        assert!(rendered_text.contains("THE_END"));
+        assert!(rows.len() > 6);
+    }
+
+    #[test]
+    fn agent_activity_glyph_alternates_between_plus_and_minus() {
+        assert_eq!(agent_activity_glyph(std::time::Duration::ZERO), "+");
+        assert_eq!(agent_activity_glyph(AGENT_ACTIVITY_INTERVAL), "−");
+        assert_eq!(agent_activity_glyph(AGENT_ACTIVITY_INTERVAL * 2), "+");
+    }
+
+    #[test]
+    fn running_agent_keeps_subtle_actions_in_collapsed_and_expanded_views() {
+        let mut note = Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            crate::note::AgentProvider::Claude,
+            "Explain this".to_string(),
+            1,
+        );
+        note.agent.as_mut().unwrap().status = AgentStatus::Running {
+            started_at: std::time::Instant::now(),
+            slow: false,
+        };
+
+        let collapsed = build_note_rows(&note, 60, false);
+        let expanded = build_note_rows(&note, 60, true);
+
+        assert!(collapsed.iter().any(|row| row.contains("Responding")));
+        assert_eq!(collapsed.last().unwrap(), "Enter to expand · c to cancel");
+        assert_eq!(expanded.last().unwrap(), "Enter to collapse · c to cancel");
     }
 
     #[test]
