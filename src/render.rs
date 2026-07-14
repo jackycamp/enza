@@ -12,6 +12,7 @@ use crate::layout::{
     RowViewState,
 };
 use crate::log;
+use crate::mention_style::styled_mentions;
 use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
@@ -151,6 +152,7 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
                     old_lineno: None,
                     new_lineno: None,
                     note_id: None,
+                    note_row_offset: 0,
                 },
             )
             .unwrap_or(range.start) as u16
@@ -322,6 +324,20 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
     let target = app.composer_note_target();
+    let mut title = match app.notes.composer_mode {
+        Some(crate::state::NoteComposerMode::Reply { note_id }) => app
+            .notes
+            .items
+            .iter()
+            .find(|note| note.id == note_id)
+            .and_then(|note| note.agent.as_ref())
+            .map(|agent| format!(" Reply to {} ", agent.provider.mention()))
+            .unwrap_or_else(|| " Reply ".to_string()),
+        _ => " Note ".to_string(),
+    };
+    if let Some(error) = &app.notes.input_error {
+        title = format!(" Note · {error} ");
+    }
 
     let inner = inner_pane_area(area);
     if inner.width < 12 || inner.height < 3 {
@@ -329,10 +345,13 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     let composer_height = 3;
-    let anchor_visible_row = app
-        .note_anchor_row()
+    let reply_row = app.reply_composer_row();
+    let anchor_visible_row = reply_row
+        .unwrap_or_else(|| app.note_anchor_row())
         .saturating_sub(app.main_pane.scroll as usize) as u16;
-    let y = if anchor_visible_row >= composer_height {
+    let y = if reply_row.is_some() {
+        inner.y + anchor_visible_row
+    } else if anchor_visible_row >= composer_height {
         inner.y + anchor_visible_row - composer_height
     } else {
         inner.y + anchor_visible_row.saturating_add(1)
@@ -347,40 +366,63 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         width,
         height: composer_height,
     };
+    let visible_draft = composer_visible_text(draft, area.width.saturating_sub(3) as usize);
 
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(Line::from(draft.clone())).block(
+        Paragraph::new(Line::from(styled_mentions(
+            &visible_draft,
+            Style::default().fg(Color::White),
+        )))
+        .block(
             Block::default()
-                .title(Span::styled(
-                    " Note ",
+                .title(Line::from(styled_mentions(
+                    &title,
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
-                ))
+                )))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::White)),
         ),
         area,
     );
 
-    let cursor_x = area.x.saturating_add(1).saturating_add(
-        draft
-            .chars()
-            .count()
-            .min(area.width.saturating_sub(3) as usize) as u16,
-    );
+    let cursor_x = area
+        .x
+        .saturating_add(1)
+        .saturating_add(visible_draft.chars().count() as u16);
     let cursor_y = area.y.saturating_add(1);
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
+fn composer_visible_text(draft: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if draft.chars().count() <= max_chars {
+        return draft.to_string();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+
+    let mut tail = draft.chars().rev().take(max_chars - 1).collect::<Vec<_>>();
+    tail.reverse();
+    format!("…{}", tail.into_iter().collect::<String>())
+}
+
 fn composer_width(mode: DiffMode, inner: Rect, target: Option<&NoteTarget>) -> u16 {
     match (mode, composer_side(target)) {
-        (DiffMode::SideBySide, ComposerSide::Left | ComposerSide::Right) => {
-            let (left_width, right_width) = split_composer_width(inner.width.saturating_sub(3));
-            left_width.max(right_width).min(64)
+        (DiffMode::SideBySide, ComposerSide::Left) => {
+            let (left_width, _) = split_composer_width(inner.width.saturating_sub(3));
+            left_width
         }
-        _ => inner.width.min(64),
+        (DiffMode::SideBySide, ComposerSide::Right) => {
+            let (_, right_width) = split_composer_width(inner.width.saturating_sub(3));
+            right_width
+        }
+        _ => inner.width,
     }
 }
 
@@ -791,7 +833,58 @@ fn row_index_for_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_sidebar_width, sidebar_file_label, truncate_filename, truncate_middle};
+    use super::{
+        composer_visible_text, composer_width, composer_x, fit_sidebar_width, sidebar_file_label,
+        truncate_filename, truncate_middle,
+    };
+    use crate::note::NoteTarget;
+    use crate::state::DiffMode;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn note_composer_uses_the_full_relevant_panel_width() {
+        let inner = Rect::new(10, 2, 100, 20);
+        let left_target = NoteTarget::Line {
+            file_path: "test.rs".to_string(),
+            old_lineno: Some(1),
+            new_lineno: None,
+        };
+        let right_target = NoteTarget::Line {
+            file_path: "test.rs".to_string(),
+            old_lineno: None,
+            new_lineno: Some(1),
+        };
+
+        let left_width = composer_width(DiffMode::SideBySide, inner, Some(&left_target));
+        let right_width = composer_width(DiffMode::SideBySide, inner, Some(&right_target));
+
+        assert_eq!(left_width, 48);
+        assert_eq!(right_width, 49);
+        assert_eq!(
+            composer_x(DiffMode::SideBySide, inner, Some(&left_target), left_width),
+            10
+        );
+        assert_eq!(
+            composer_x(
+                DiffMode::SideBySide,
+                inner,
+                Some(&right_target),
+                right_width
+            ),
+            61
+        );
+        assert_eq!(
+            composer_width(DiffMode::Inline, inner, Some(&left_target)),
+            100
+        );
+    }
+
+    #[test]
+    fn note_composer_follows_the_end_of_long_drafts() {
+        assert_eq!(composer_visible_text("short", 8), "short");
+        assert_eq!(composer_visible_text("abcdefghij", 6), "…fghij");
+        assert_eq!(composer_visible_text("one 🦆 three", 7), "… three");
+    }
 
     #[test]
     fn sidebar_expands_for_long_file_names_when_space_is_available() {

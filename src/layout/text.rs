@@ -1,4 +1,7 @@
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
     let mut rows = Vec::new();
     let mut current = String::new();
 
@@ -6,6 +9,23 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
         let current_len = current.chars().count();
         let word_len = word.chars().count();
         let separator = usize::from(!current.is_empty());
+
+        if word_len > width {
+            if !current.is_empty() {
+                rows.push(current);
+                current = String::new();
+            }
+            let characters = word.chars().collect::<Vec<_>>();
+            for chunk in characters.chunks(width) {
+                let chunk = chunk.iter().collect::<String>();
+                if chunk.chars().count() == width {
+                    rows.push(chunk);
+                } else {
+                    current = chunk;
+                }
+            }
+            continue;
+        }
 
         if current_len + separator + word_len > width && !current.is_empty() {
             rows.push(current);
@@ -62,4 +82,22 @@ pub fn format_lineno(lineno: Option<usize>) -> String {
     lineno
         .map(|value| value.to_string())
         .unwrap_or_else(|| "·".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapping_preserves_long_unbroken_words() {
+        assert_eq!(wrap_text("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn wrapping_long_words_keeps_surrounding_text() {
+        assert_eq!(
+            wrap_text("one abcdefghij two", 4),
+            ["one", "abcd", "efgh", "ij", "two"]
+        );
+    }
 }

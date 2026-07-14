@@ -391,8 +391,14 @@ impl Layout {
                 row_context_for_plan_row(session, &self.base.plan, base_index)
             }
             LayoutRowLocation::Note {
-                insertion_index, ..
-            } => Some(self.note_insertions.get(insertion_index)?.context),
+                insertion_index,
+                row_offset,
+            } => Some(
+                self.note_insertions
+                    .get(insertion_index)?
+                    .context
+                    .with_note_row_offset(row_offset),
+            ),
         }
     }
 
@@ -500,13 +506,18 @@ impl Layout {
     }
 }
 
-/// Finds the first rendered row for an inserted note row.
+/// Finds a rendered row within an inserted note.
 fn note_row_index(insertions: &[NoteInsertion], target: RowContext) -> Option<usize> {
     let mut inserted_before = 0usize;
     for insertion in insertions {
         let insertion_start = insertion.base_index + inserted_before;
-        if insertion.context == target {
-            return Some(insertion_start);
+        let mut base_context = target;
+        base_context.note_row_offset = 0;
+        if insertion.context == base_context {
+            let offset = target
+                .note_row_offset
+                .min(insertion.len().saturating_sub(1));
+            return Some(insertion_start + offset);
         }
         inserted_before += insertion.len();
     }

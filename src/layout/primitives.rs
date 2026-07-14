@@ -15,6 +15,8 @@ pub struct RowContext {
     pub old_lineno: Option<usize>,
     pub new_lineno: Option<usize>,
     pub note_id: Option<u64>,
+    /// The rendered row within a note card. Zero is the top border.
+    pub note_row_offset: usize,
 }
 
 impl RowContext {
@@ -26,6 +28,7 @@ impl RowContext {
             old_lineno: None,
             new_lineno: None,
             note_id: None,
+            note_row_offset: 0,
         }
     }
 
@@ -37,6 +40,7 @@ impl RowContext {
             old_lineno: None,
             new_lineno: None,
             note_id: None,
+            note_row_offset: 0,
         }
     }
 
@@ -48,6 +52,7 @@ impl RowContext {
             old_lineno: None,
             new_lineno: None,
             note_id: None,
+            note_row_offset: 0,
         }
     }
 
@@ -64,6 +69,7 @@ impl RowContext {
             old_lineno,
             new_lineno,
             note_id: None,
+            note_row_offset: 0,
         }
     }
 
@@ -75,6 +81,7 @@ impl RowContext {
             old_lineno: None,
             new_lineno: None,
             note_id: None,
+            note_row_offset: 0,
         }
     }
 
@@ -86,7 +93,13 @@ impl RowContext {
             old_lineno: None,
             new_lineno: None,
             note_id: Some(note_id),
+            note_row_offset: 0,
         }
+    }
+
+    pub fn with_note_row_offset(mut self, note_row_offset: usize) -> Self {
+        self.note_row_offset = note_row_offset;
+        self
     }
 }
 
