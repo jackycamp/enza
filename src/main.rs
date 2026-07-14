@@ -6,7 +6,6 @@ mod input;
 mod landing;
 mod layout;
 mod log;
-mod mention_style;
 mod note;
 mod render;
 mod state;

@@ -6,12 +6,12 @@ use ratatui::{
 use crate::diff::DiffSession;
 use crate::layout::base_layout::BaseLayout;
 use crate::layout::lines::{combined_side_line, split_side_by_side_width};
+use crate::layout::note_style::{styled_mentions, styled_note_text};
 use crate::layout::plan::plan_row_contexts;
 use crate::layout::primitives::{
     HunkRange, LayoutWidths, NoteInsertion, RenderRow, RowContext, RowKind,
 };
 use crate::layout::text::{fit_text, truncate_with_ellipsis, wrap_text};
-use crate::mention_style::{styled_mentions, styled_note_text};
 use crate::note::{AGENT_ACTIVITY_INTERVAL, AgentStatus, MessageAuthor, Note, NoteTarget};
 
 pub(super) struct NoteOverlay {

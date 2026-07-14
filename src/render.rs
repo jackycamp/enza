@@ -9,10 +9,9 @@ use ratatui::{
 use crate::diff::FileChangeKind;
 use crate::layout::{
     HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
-    RowViewState,
+    RowViewState, styled_mentions,
 };
 use crate::log;
-use crate::mention_style::styled_mentions;
 use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 

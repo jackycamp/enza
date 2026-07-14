@@ -30,6 +30,7 @@ mod base_layout;
 mod hunk_load_plan;
 mod layout_tree;
 mod lines;
+mod note_style;
 mod notes;
 mod plan;
 mod primitives;
@@ -40,6 +41,7 @@ mod window;
 mod worker;
 
 pub use layout_tree::NodeStatus;
+pub(crate) use note_style::styled_mentions;
 pub(crate) use primitives::LayoutWidths;
 pub use primitives::{RowContext, RowKind, RowViewState};
 pub(crate) use window::{HunkWindowTarget, LayoutBuildOptions};

@@ -5,10 +5,10 @@ use ratatui::{
 
 use crate::note::AgentProvider;
 
-pub const CODEX_COLOR: Color = Color::Rgb(180, 120, 255);
-pub const CLAUDE_COLOR: Color = Color::Rgb(255, 159, 67);
-pub const ACTIVITY_PLUS_COLOR: Color = Color::Rgb(80, 200, 120);
-pub const ACTIVITY_MINUS_COLOR: Color = Color::Rgb(255, 95, 95);
+pub(super) const CODEX_COLOR: Color = Color::Rgb(180, 120, 255);
+pub(super) const CLAUDE_COLOR: Color = Color::Rgb(255, 159, 67);
+pub(super) const ACTIVITY_PLUS_COLOR: Color = Color::Rgb(80, 200, 120);
+pub(super) const ACTIVITY_MINUS_COLOR: Color = Color::Rgb(255, 95, 95);
 
 pub fn styled_mentions(text: &str, base_style: Style) -> Vec<Span<'static>> {
     let lowercase = text.to_ascii_lowercase();
@@ -62,7 +62,7 @@ pub fn styled_mentions(text: &str, base_style: Style) -> Vec<Span<'static>> {
     spans
 }
 
-pub fn styled_note_text(text: &str, base_style: Style) -> Vec<Span<'static>> {
+pub(super) fn styled_note_text(text: &str, base_style: Style) -> Vec<Span<'static>> {
     let leading_spaces = text.len() - text.trim_start_matches(' ').len();
     let (leading, content) = text.split_at(leading_spaces);
     if let Some((glyph, color)) = [("+", ACTIVITY_PLUS_COLOR), ("−", ACTIVITY_MINUS_COLOR)]
@@ -123,7 +123,7 @@ fn is_subtle_note_metadata(content: &str) -> bool {
         || content.contains(" more messages")
 }
 
-pub fn provider_color(provider: AgentProvider) -> Color {
+fn provider_color(provider: AgentProvider) -> Color {
     match provider {
         AgentProvider::Codex => CODEX_COLOR,
         AgentProvider::Claude => CLAUDE_COLOR,
