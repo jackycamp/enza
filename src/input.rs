@@ -12,14 +12,12 @@ use crate::{
 pub enum NavAction {
     None,
     RevealSelectedHunk,
-    PromptForNote,
     SyncSelectionToScroll,
 }
 
 impl NavAction {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
-            (_, Self::PromptForNote) | (Self::PromptForNote, _) => Self::PromptForNote,
             (_, Self::RevealSelectedHunk) | (Self::RevealSelectedHunk, _) => {
                 Self::RevealSelectedHunk
             }
@@ -146,7 +144,24 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
             NavAction::None
         }
         (KeyCode::Char('n'), _) => match app.global.focus {
-            FocusPane::Main => NavAction::PromptForNote,
+            FocusPane::Main => {
+                app.start_contextual_note_input();
+                NavAction::None
+            }
+            FocusPane::Files => NavAction::None,
+        },
+        (KeyCode::Char('c'), _) => match app.global.focus {
+            FocusPane::Main => {
+                app.cancel_current_agent();
+                NavAction::None
+            }
+            FocusPane::Files => NavAction::None,
+        },
+        (KeyCode::Char('r'), _) => match app.global.focus {
+            FocusPane::Main => {
+                app.retry_current_agent();
+                NavAction::None
+            }
             FocusPane::Files => NavAction::None,
         },
         (KeyCode::Char('v'), _) => match app.global.focus {

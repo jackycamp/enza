@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use git2::{Delta, Diff as GitDiff, DiffOptions, Patch, Repository, Tree};
 
@@ -97,6 +100,14 @@ impl DiffSession {
             .map(|hunk| hunk.lines.len())
             .sum::<usize>()
     }
+}
+
+pub fn discover_repo_root(path: impl AsRef<Path>) -> Result<PathBuf, git2::Error> {
+    let repo = Repository::discover(path)?;
+    Ok(repo
+        .workdir()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| repo.path().to_path_buf()))
 }
 
 impl DiffFilter {
