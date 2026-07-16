@@ -7,7 +7,7 @@
 //! map. Keep these layers separate so unloaded hunks still keep stable row
 //! numbers without storing rendered rows for the whole diff.
 
-use std::time::Instant;
+use std::{ops::Range, time::Instant};
 
 use ratatui::{
     style::{Color, Style},
@@ -30,7 +30,7 @@ mod base_layout;
 mod hunk_load_plan;
 mod layout_tree;
 mod lines;
-mod note_style;
+mod note;
 mod notes;
 mod plan;
 mod primitives;
@@ -41,7 +41,7 @@ mod window;
 mod worker;
 
 pub use layout_tree::NodeStatus;
-pub(crate) use note_style::styled_mentions;
+pub(crate) use note::{DiffSide, note_side, styled_mentions, width_for_side};
 pub(crate) use primitives::LayoutWidths;
 pub use primitives::{RowContext, RowKind, RowViewState};
 pub(crate) use window::{HunkWindowTarget, LayoutBuildOptions};
@@ -90,6 +90,7 @@ impl Layout {
     ///     &app.session,
     ///     &app.notes.items,
     ///     &app.notes.expanded_ids,
+    ///     app.notes.reply_composer_note_id(),
     ///     LayoutBuildOptions {
     ///         widths: LayoutWidths {
     ///             inline: 80,
@@ -104,6 +105,7 @@ impl Layout {
         session: &DiffSession,
         notes: &[Note],
         expanded_note_ids: &[u64],
+        reply_composer_note_id: Option<u64>,
         options: LayoutBuildOptions,
     ) -> Self {
         let mut timer = log::timer("layout_build");
@@ -134,7 +136,7 @@ impl Layout {
             note_insertions: Vec::new(),
             row_count: 0,
         };
-        layout.refresh_notes(session, notes, expanded_note_ids);
+        layout.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
         timer.field("base_rows", layout.base.plan.row_count);
         timer.field("rows", layout.row_count);
         layout
@@ -151,6 +153,7 @@ impl Layout {
         session: &DiffSession,
         notes: &[Note],
         expanded_note_ids: &[u64],
+        reply_composer_note_id: Option<u64>,
         target: HunkWindowTarget,
     ) -> bool {
         if !self.target_state.generation_ready {
@@ -185,7 +188,7 @@ impl Layout {
         let flatten_ms = flatten_start.elapsed().as_millis();
 
         let note_start = Instant::now();
-        self.refresh_notes(session, notes, expanded_note_ids);
+        self.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
         let note_ms = note_start.elapsed().as_millis();
         let mut fields = vec![
             ("elapsed_ms", expand_start.elapsed().as_millis().to_string()),
@@ -245,6 +248,7 @@ impl Layout {
         session: &DiffSession,
         notes: &[Note],
         expanded_note_ids: &[u64],
+        reply_composer_note_id: Option<u64>,
         selected_file: usize,
         selected_hunk: usize,
     ) -> bool {
@@ -267,7 +271,7 @@ impl Layout {
 
         *hunk_node = HunkNode::ready(selected_file, selected_hunk, &file.path, hunk, widths);
 
-        self.refresh_notes(session, notes, expanded_note_ids);
+        self.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
         true
     }
 
@@ -280,6 +284,7 @@ impl Layout {
         session: &DiffSession,
         notes: &[Note],
         expanded_note_ids: &[u64],
+        reply_composer_note_id: Option<u64>,
     ) {
         let mut timer = log::timer("layout_refresh_notes");
         timer.field("notes", notes.len());
@@ -290,6 +295,7 @@ impl Layout {
             base: &self.base,
             notes,
             expanded_note_ids,
+            reply_composer_note_id,
             widths: self.widths(),
         });
 
@@ -435,6 +441,23 @@ impl Layout {
             .map(NoteInsertion::len)
             .sum::<usize>();
         Some(base_index + inserted_before_or_at)
+    }
+
+    /// Returns the absolute rendered rows reserved for a note's reply composer.
+    pub fn note_composer_bounds(&self, note_id: u64) -> Option<Range<usize>> {
+        let mut inserted_before = 0usize;
+        for insertion in &self.note_insertions {
+            let insertion_start = insertion.base_index + inserted_before;
+            if insertion.context.note_id == Some(note_id) {
+                let bounds = insertion.composer_bounds.clone()?;
+                return Some(
+                    insertion_start.saturating_add(bounds.start)
+                        ..insertion_start.saturating_add(bounds.end),
+                );
+            }
+            inserted_before += insertion.len();
+        }
+        None
     }
 
     /// Builds a hunk loading target from the currently visible rendered rows.

@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use ratatui::text::Line;
 
 #[derive(Clone, Debug)]
@@ -179,6 +181,8 @@ pub struct NoteInsertion {
     pub inline_rows: Vec<RenderRow>,
     pub side_by_side_rows: Vec<RenderRow>,
     pub context: RowContext,
+    /// Composer rows relative to the start of this insertion.
+    pub composer_bounds: Option<Range<usize>>,
 }
 
 impl NoteInsertion {

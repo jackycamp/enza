@@ -8,8 +8,8 @@ use ratatui::{
 
 use crate::diff::FileChangeKind;
 use crate::layout::{
-    HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
-    RowViewState, styled_mentions,
+    DiffSide, HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
+    RowViewState, note_side, styled_mentions, width_for_side,
 };
 use crate::log;
 use crate::note::NoteTarget;
@@ -68,6 +68,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
+            app.notes.reply_composer_note_id(),
             LayoutBuildOptions { widths, target },
         ));
     } else if let Some(layout) = &mut app.layout {
@@ -76,6 +77,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
+            app.notes.reply_composer_note_id(),
             target,
         );
     }
@@ -123,6 +125,7 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
             &app.session,
             &app.notes.items,
             &app.notes.expanded_ids,
+            app.notes.reply_composer_note_id(),
             app.main_pane.selected_file,
             app.main_pane.selected_hunk,
         );
@@ -319,22 +322,23 @@ fn render_inline(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(draft) = &app.notes.draft else {
+    let Some(composer) = &app.notes.composer else {
         return;
     };
+    let draft = &composer.draft;
     let target = app.composer_note_target();
-    let mut title = match app.notes.composer_mode {
-        Some(crate::state::NoteComposerMode::Reply { note_id }) => app
+    let mut title = match composer.mode {
+        crate::state::NoteComposerMode::Reply { note_id } => app
             .notes
             .items
             .iter()
             .find(|note| note.id == note_id)
-            .and_then(|note| note.agent.as_ref())
-            .map(|agent| format!(" Reply to {} ", agent.provider.mention()))
+            .and_then(|note| note.agent_thread())
+            .map(|thread| format!(" Reply to {} ", thread.provider().mention()))
             .unwrap_or_else(|| " Reply ".to_string()),
         _ => " Note ".to_string(),
     };
-    if let Some(error) = &app.notes.input_error {
+    if let Some(error) = &composer.error {
         title = format!(" Note · {error} ");
     }
 
@@ -343,8 +347,11 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let composer_height = 3;
-    let reply_row = app.reply_composer_row();
+    let reply_bounds = app.reply_composer_bounds();
+    let composer_height = reply_bounds
+        .as_ref()
+        .map_or(3, |bounds| bounds.len().try_into().unwrap_or(u16::MAX));
+    let reply_row = reply_bounds.as_ref().map(|bounds| bounds.start);
     let anchor_visible_row = reply_row
         .unwrap_or_else(|| app.note_anchor_row())
         .saturating_sub(app.main_pane.scroll as usize) as u16;
@@ -412,68 +419,24 @@ fn composer_visible_text(draft: &str, max_chars: usize) -> String {
 }
 
 fn composer_width(mode: DiffMode, inner: Rect, target: Option<&NoteTarget>) -> u16 {
-    match (mode, composer_side(target)) {
-        (DiffMode::SideBySide, ComposerSide::Left) => {
-            let (left_width, _) = split_composer_width(inner.width.saturating_sub(3));
-            left_width
-        }
-        (DiffMode::SideBySide, ComposerSide::Right) => {
-            let (_, right_width) = split_composer_width(inner.width.saturating_sub(3));
-            right_width
+    match (mode, target.map(note_side).unwrap_or(DiffSide::Full)) {
+        (DiffMode::SideBySide, side @ (DiffSide::Left | DiffSide::Right)) => {
+            width_for_side(side, inner.width as usize) as u16
         }
         _ => inner.width,
     }
 }
 
 fn composer_x(mode: DiffMode, inner: Rect, target: Option<&NoteTarget>, width: u16) -> u16 {
-    match (mode, composer_side(target)) {
-        (DiffMode::SideBySide, ComposerSide::Left) => inner.x,
-        (DiffMode::SideBySide, ComposerSide::Right) => {
-            let (left_width, _) = split_composer_width(inner.width.saturating_sub(3));
+    match (mode, target.map(note_side).unwrap_or(DiffSide::Full)) {
+        (DiffMode::SideBySide, DiffSide::Left) => inner.x,
+        (DiffMode::SideBySide, DiffSide::Right) => {
+            let left_width = width_for_side(DiffSide::Left, inner.width as usize) as u16;
             inner.x + left_width + 3
         }
         _ => inner.x,
     }
     .min(inner.x + inner.width.saturating_sub(width))
-}
-
-fn split_composer_width(width: u16) -> (u16, u16) {
-    let left = width / 2;
-    let right = width.saturating_sub(left);
-    (left, right)
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ComposerSide {
-    Full,
-    Left,
-    Right,
-}
-
-fn composer_side(target: Option<&NoteTarget>) -> ComposerSide {
-    match target {
-        Some(NoteTarget::Line {
-            old_lineno: Some(_),
-            new_lineno: None,
-            ..
-        })
-        | Some(NoteTarget::Range {
-            start_old_lineno: Some(_),
-            start_new_lineno: None,
-            ..
-        }) => ComposerSide::Left,
-        Some(NoteTarget::Line {
-            old_lineno: None,
-            new_lineno: Some(_),
-            ..
-        })
-        | Some(NoteTarget::Range {
-            start_old_lineno: None,
-            start_new_lineno: Some(_),
-            ..
-        }) => ComposerSide::Right,
-        _ => ComposerSide::Full,
-    }
 }
 
 fn render_widths(app: &App, area: Rect) -> (usize, usize) {
