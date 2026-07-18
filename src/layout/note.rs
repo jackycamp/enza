@@ -9,8 +9,8 @@ use ratatui::{
 use crate::layout::lines::{combined_side_line, split_side_by_side_width};
 use crate::layout::text::{truncate_with_ellipsis, wrap_text};
 use crate::note::{
-    AGENT_ACTIVITY_INTERVAL, AgentFailureKind, AgentProvider, AgentRunState, MessageAuthor, Note,
-    NoteTarget,
+    AGENT_ACTIVITY_INTERVAL, AgentFailureKind, AgentProvider, AgentRunState, AgentThread,
+    MessageAuthor, Note, NoteTarget,
 };
 
 pub(crate) const NOTE_COMPOSER_HEIGHT: usize = 3;
@@ -97,7 +97,7 @@ pub(super) fn build_note_rows(
 }
 
 fn build_expanded_agent_rows(
-    thread: &crate::note::AgentThread,
+    thread: &AgentThread,
     width: usize,
     composer_active: bool,
 ) -> Vec<NoteRow> {
@@ -154,11 +154,18 @@ fn build_expanded_agent_rows(
     rows
 }
 
-fn build_collapsed_agent_rows(thread: &crate::note::AgentThread, _width: usize) -> Vec<NoteRow> {
+fn build_collapsed_agent_rows(thread: &AgentThread, _width: usize) -> Vec<NoteRow> {
     let mut rows = Vec::new();
     let messages = thread.messages();
+    let show_current_attempt = match thread.state() {
+        AgentRunState::Ready { .. } => false,
+        AgentRunState::Queued { .. }
+        | AgentRunState::Running { .. }
+        | AgentRunState::Failed { .. }
+        | AgentRunState::Cancelled { .. } => true,
+    };
 
-    if !matches!(thread.state(), AgentRunState::Ready { .. }) {
+    if show_current_attempt {
         if let Some(message) = messages
             .iter()
             .rev()
@@ -653,6 +660,7 @@ fn is_mention_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::note::AgentFailure;
 
     fn file_target() -> NoteTarget {
         NoteTarget::File {
@@ -762,11 +770,7 @@ mod tests {
         assert!(failed_thread.queue_reply(2, "The failed follow-up".to_string()));
         assert!(failed_thread.fail(
             2,
-            crate::note::AgentFailure::new(
-                AgentFailureKind::ProcessExit,
-                "The follow-up failed.",
-                true,
-            ),
+            AgentFailure::new(AgentFailureKind::ProcessExit, "The follow-up failed.", true,),
         ));
 
         let mut cancelled = ready_agent_note(AgentProvider::Claude, "The first answer.");
