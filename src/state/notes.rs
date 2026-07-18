@@ -46,19 +46,28 @@ impl NoteState {
         self.composer.is_some()
     }
 
-    pub fn start_input(&mut self, current_note: Option<Note>) {
+    pub fn start_input(&mut self, note_id: Option<NoteId>) -> bool {
         if self.composer.is_some() {
-            return;
+            return false;
         }
 
-        let (mode, draft) = match current_note {
-            Some(note) if note.is_agent_thread() => {
-                (NoteComposerMode::Reply { note_id: note.id }, String::new())
+        let (mode, draft) = match note_id {
+            Some(note_id) => {
+                let Some(note) = self.items.iter().find(|note| note.id == note_id) else {
+                    return false;
+                };
+                if let Some(thread) = note.agent_thread() {
+                    if !thread.state().can_reply() {
+                        return false;
+                    }
+                    (NoteComposerMode::Reply { note_id }, String::new())
+                } else {
+                    (
+                        NoteComposerMode::EditPersonal { note_id },
+                        note.personal_body().unwrap_or_default().to_string(),
+                    )
+                }
             }
-            Some(note) => (
-                NoteComposerMode::EditPersonal { note_id: note.id },
-                note.personal_body().unwrap_or_default().to_string(),
-            ),
             None => (NoteComposerMode::Create, String::new()),
         };
         self.composer = Some(NoteComposer {
@@ -66,6 +75,7 @@ impl NoteState {
             draft,
             error: None,
         });
+        true
     }
 
     pub fn cancel_input(&mut self) {
@@ -169,7 +179,7 @@ mod tests {
             .items
             .push(Note::new(1, target(), "remember this".to_string()));
 
-        state.start_input(state.items.first().cloned());
+        assert!(state.start_input(Some(1)));
 
         assert_eq!(
             state.composer,
@@ -182,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_notes_open_an_empty_reply_composer() {
+    fn only_ready_agent_threads_open_a_reply_composer() {
         let mut state = NoteState::default();
         state.items.push(Note::new_agent(
             1,
@@ -192,7 +202,18 @@ mod tests {
             1,
         ));
 
-        state.start_input(state.items.first().cloned());
+        assert!(!state.start_input(Some(1)));
+        assert!(state.composer.is_none());
+
+        let thread = state.items[0].agent_thread_mut().unwrap();
+        assert!(thread.mark_running(1, std::time::Instant::now()));
+        assert!(thread.complete(
+            1,
+            "session-1".to_string(),
+            "Here is the answer.".to_string(),
+        ));
+
+        assert!(state.start_input(Some(1)));
 
         assert_eq!(
             state.composer,
@@ -203,6 +224,14 @@ mod tests {
             })
         );
         state.cancel_input();
+        assert!(state.composer.is_none());
+    }
+
+    #[test]
+    fn an_unknown_context_does_not_fall_back_to_create_mode() {
+        let mut state = NoteState::default();
+
+        assert!(!state.start_input(Some(99)));
         assert!(state.composer.is_none());
     }
 }

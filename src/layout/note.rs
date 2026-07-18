@@ -158,7 +158,7 @@ fn build_collapsed_agent_rows(thread: &crate::note::AgentThread, _width: usize) 
     let mut rows = Vec::new();
     let messages = thread.messages();
 
-    if thread.state().is_active() {
+    if !matches!(thread.state(), AgentRunState::Ready { .. }) {
         if let Some(message) = messages
             .iter()
             .rev()
@@ -753,6 +753,55 @@ mod tests {
 
         assert!(text.contains("THE_END"));
         assert!(rendered.rows.len() > 6);
+    }
+
+    #[test]
+    fn collapsed_failed_and_cancelled_follow_ups_show_the_latest_user_message() {
+        let mut failed = ready_agent_note(AgentProvider::Codex, "The first answer.");
+        let failed_thread = failed.agent_thread_mut().unwrap();
+        assert!(failed_thread.queue_reply(2, "The failed follow-up".to_string()));
+        assert!(failed_thread.fail(
+            2,
+            crate::note::AgentFailure::new(
+                AgentFailureKind::ProcessExit,
+                "The follow-up failed.",
+                true,
+            ),
+        ));
+
+        let mut cancelled = ready_agent_note(AgentProvider::Claude, "The first answer.");
+        let cancelled_thread = cancelled.agent_thread_mut().unwrap();
+        assert!(cancelled_thread.queue_reply(2, "The cancelled follow-up".to_string()));
+        assert!(cancelled_thread.cancel(2));
+
+        for (note, expected_message, expected_status) in [
+            (failed, "The failed follow-up", "Agent request failed"),
+            (
+                cancelled,
+                "The cancelled follow-up",
+                "Agent request cancelled",
+            ),
+        ] {
+            let rows = build_note_rows(&note, 60, false, false);
+            assert!(matches!(
+                &rows[0],
+                NoteRow::Summary {
+                    author: NoteAuthor::User,
+                    body,
+                } if body == expected_message
+            ));
+            assert!(matches!(
+                &rows[1],
+                NoteRow::Metadata(status) if status.starts_with(expected_status)
+            ));
+            assert!(!rows.iter().any(|row| matches!(
+                row,
+                NoteRow::Summary {
+                    author: NoteAuthor::Agent(_),
+                    ..
+                }
+            )));
+        }
     }
 
     #[test]

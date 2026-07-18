@@ -200,10 +200,6 @@ impl Note {
         }
     }
 
-    pub fn is_agent_thread(&self) -> bool {
-        matches!(self.content, NoteContent::AgentThread(_))
-    }
-
     pub fn personal_body(&self) -> Option<&str> {
         let NoteContent::Personal(body) = &self.content else {
             return None;

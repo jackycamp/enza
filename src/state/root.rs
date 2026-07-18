@@ -271,24 +271,16 @@ impl App {
     }
 
     pub fn edit_current_note(&mut self) {
-        let Some(current_note) = self.current_note_id().and_then(|note_id| {
-            self.notes
-                .items
-                .iter()
-                .find(|note| note.id == note_id)
-                .cloned()
-        }) else {
+        let Some(note_id) = self.current_note_id() else {
             return;
         };
-        if current_note
-            .agent_thread()
-            .is_some_and(|thread| !thread.state().can_reply())
-        {
+        if !self.notes.start_input(Some(note_id)) {
             return;
         }
-        let reply_note_id = current_note.is_agent_thread().then_some(current_note.id);
-        self.notes.start_input(Some(current_note));
-        if let Some(note_id) = reply_note_id {
+        if matches!(
+            self.notes.composer_mode(),
+            Some(crate::state::NoteComposerMode::Reply { .. })
+        ) {
             if !self.notes.expanded_ids.contains(&note_id) {
                 self.notes.expanded_ids.push(note_id);
             }
