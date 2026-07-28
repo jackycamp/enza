@@ -1,7 +1,17 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
+#[cfg(test)]
+use std::path::PathBuf;
+
+use crate::agent::{
+    AgentRuntime, MentionParseError, ParsedNoteInput, ReviewContext, parse_note_input,
+};
+#[cfg(test)]
+use crate::diff::DiffTarget;
 use crate::diff::{DiffFile, DiffSession};
 use crate::layout::{Layout, LayoutWorker, RowContext};
+#[cfg(test)]
+use crate::note::AgentProvider;
 use crate::note::{Note, NoteTarget};
 use crate::state::{
     DiffMode, FocusPane, GlobalState, MainPaneState, NoteInputResult, NoteState, SidebarEntry,
@@ -11,19 +21,31 @@ use crate::state::{
 #[derive(Debug)]
 pub struct App {
     pub session: Arc<DiffSession>,
+    pub review: ReviewContext,
     pub layout: Option<Layout>,
     pub layout_worker: LayoutWorker,
     pub global: GlobalState,
     pub main_pane: MainPaneState,
     pub sidebar: SidebarState,
     pub notes: NoteState,
+    pub agent_runtime: AgentRuntime,
+    pub agent_animation_phase: Option<u128>,
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(session: DiffSession) -> Self {
+        Self::new_with_review_context(
+            session,
+            ReviewContext::new(PathBuf::from("."), DiffTarget::Worktree),
+        )
+    }
+
+    pub fn new_with_review_context(session: DiffSession, review: ReviewContext) -> Self {
         let session = Arc::new(session);
         Self {
             session: Arc::clone(&session),
+            review,
             layout: None,
             layout_worker: LayoutWorker::new(session),
             global: GlobalState {
@@ -44,12 +66,9 @@ impl App {
                 cursor: 0,
                 collapsed_dirs: Vec::new(),
             },
-            notes: NoteState {
-                items: Vec::new(),
-                expanded_ids: Vec::new(),
-                draft: None,
-                editing_id: None,
-            },
+            notes: NoteState::default(),
+            agent_runtime: AgentRuntime::new(),
+            agent_animation_phase: None,
         }
     }
 
@@ -215,7 +234,7 @@ impl App {
     }
 
     pub fn add_note(&mut self, target: NoteTarget, body: String) {
-        let id = self.notes.items.len() as u64 + 1;
+        let id = self.notes.allocate_note_id();
         self.notes.items.push(Note::new(id, target, body));
         self.refresh_note_overlay();
     }
@@ -239,19 +258,48 @@ impl App {
         self.notes.input_active()
     }
 
-    pub fn start_note_input(&mut self) {
-        let current_note = self.current_note_id().and_then(|note_id| {
-            self.notes
-                .items
-                .iter()
-                .find(|note| note.id == note_id)
-                .cloned()
-        });
-        self.notes.start_input(current_note);
+    pub fn start_new_note_input(&mut self) {
+        self.notes.start_input(None);
+    }
+
+    pub fn start_contextual_note_input(&mut self) {
+        if self.current_note_id().is_some() {
+            self.edit_current_note();
+        } else {
+            self.start_new_note_input();
+        }
+    }
+
+    pub fn edit_current_note(&mut self) {
+        let Some(note_id) = self.current_note_id() else {
+            return;
+        };
+        if !self.notes.start_input(Some(note_id)) {
+            return;
+        }
+        if matches!(
+            self.notes.composer_mode(),
+            Some(crate::state::NoteComposerMode::Reply { .. })
+        ) {
+            if !self.notes.expanded_ids.contains(&note_id) {
+                self.notes.expanded_ids.push(note_id);
+            }
+            self.refresh_note_overlay();
+            if let Some(bounds) = self.reply_composer_bounds() {
+                self.main_pane.cursor_row = bounds.start;
+            }
+        }
     }
 
     pub fn cancel_note_input(&mut self) {
+        let was_reply = matches!(
+            self.notes.composer_mode(),
+            Some(crate::state::NoteComposerMode::Reply { .. })
+        );
         self.notes.cancel_input();
+        if was_reply {
+            self.refresh_note_overlay();
+        }
     }
 
     pub fn insert_note_text(&mut self, text: &str) {
@@ -263,22 +311,46 @@ impl App {
     }
 
     pub fn submit_note_input(&mut self) {
+        let was_reply = matches!(
+            self.notes.composer_mode(),
+            Some(crate::state::NoteComposerMode::Reply { .. })
+        );
         let Some(result) = self.notes.finish_input() else {
+            if was_reply {
+                self.refresh_note_overlay();
+            }
             return;
         };
 
         match result {
-            NoteInputResult::Edit { note_id, body } => {
-                if let Some(note) = self.notes.items.iter_mut().find(|note| note.id == note_id) {
-                    note.body = body;
+            NoteInputResult::EditPersonal { note_id, body } => {
+                if let Some(note) = self.notes.items.iter_mut().find(|note| note.id == note_id)
+                    && note.set_personal_body(body)
+                {
                     self.refresh_note_overlay();
                 }
             }
             NoteInputResult::Create { body } => {
-                if let Some(target) = self.current_note_target() {
-                    self.add_note(target, body);
-                    self.clear_selection();
+                let Some(target) = self.current_note_target() else {
+                    return;
+                };
+                match parse_note_input(&body) {
+                    Ok(ParsedNoteInput::Personal(body)) => self.add_note(target, body),
+                    Ok(ParsedNoteInput::Agent { provider, prompt }) => {
+                        self.add_agent_note(target, provider, prompt)
+                    }
+                    Err(MentionParseError::EmptyPrompt(provider)) => {
+                        self.notes.restore_create_input(
+                            body,
+                            format!("Enter a message after {}.", provider.mention()),
+                        );
+                        return;
+                    }
                 }
+                self.clear_selection();
+            }
+            NoteInputResult::Reply { note_id, body } => {
+                self.reply_to_agent_note(note_id, body);
             }
         }
     }
@@ -287,6 +359,11 @@ impl App {
         self.selected_row_range()
             .map(|(start, _)| start)
             .unwrap_or(self.main_pane.cursor_row)
+    }
+
+    pub fn reply_composer_bounds(&self) -> Option<Range<usize>> {
+        let note_id = self.notes.reply_composer_note_id()?;
+        self.layout.as_ref()?.note_composer_bounds(note_id)
     }
 
     pub fn current_note_target(&self) -> Option<NoteTarget> {
@@ -307,6 +384,12 @@ impl App {
             );
         }
 
+        if let Some(note_id) = self.current_note_id()
+            && let Some(note) = self.notes.items.iter().find(|note| note.id == note_id)
+        {
+            return Some(note.target.clone());
+        }
+
         note_target_for_row(
             &self.session.files,
             &row_contexts,
@@ -322,7 +405,7 @@ impl App {
     }
 
     pub fn composer_note_target(&self) -> Option<NoteTarget> {
-        if let Some(note_id) = self.notes.editing_id {
+        if let Some(note_id) = self.notes.composer_note_id() {
             return self
                 .notes
                 .items
@@ -343,13 +426,26 @@ impl App {
         self.sidebar.visible_entries(&self.session.files)
     }
 
-    fn refresh_note_overlay(&mut self) {
+    pub(super) fn refresh_note_overlay(&mut self) {
         let cursor_context = self.cursor_context();
+        let cursor_visual_offset = self
+            .main_pane
+            .cursor_row
+            .saturating_sub(self.main_pane.scroll as usize);
         if let Some(layout) = &mut self.layout {
-            layout.refresh_notes(&self.session, &self.notes.items, &self.notes.expanded_ids);
+            layout.refresh_notes(
+                &self.session,
+                &self.notes.items,
+                &self.notes.expanded_ids,
+                self.notes.reply_composer_note_id(),
+            );
         }
         if let Some(context) = cursor_context {
             self.remap_cursor_to_context(context);
+            self.main_pane.scroll = self
+                .main_pane
+                .cursor_row
+                .saturating_sub(cursor_visual_offset) as u16;
         }
     }
 
@@ -443,7 +539,7 @@ mod tests {
     #[test]
     fn navigation_across_an_unloaded_hunk_preserves_the_target() {
         let mut app = app_with_hunks(4);
-        let layout = Layout::build(&app.session, &[], &[], build_options(0, 1, 0));
+        let layout = Layout::build(&app.session, &[], &[], None, build_options(0, 1, 0));
 
         let boundary = row_for(&app.session, &layout, 1, RowKind::Spacer);
         app.layout = Some(layout);
@@ -459,6 +555,7 @@ mod tests {
             &app.session,
             &[],
             &[],
+            None,
             window_target(app.main_pane.selected_hunk, 1, 0),
         );
         let new_max_row = app.layout.as_ref().unwrap().row_count - 1;
@@ -484,6 +581,7 @@ mod tests {
             &app.session,
             &[],
             &[],
+            None,
             build_options(1, 1, 0),
         ));
 
@@ -494,6 +592,7 @@ mod tests {
             old_lineno: Some(2),
             new_lineno: Some(2),
             note_id: None,
+            note_row_offset: 0,
         };
         let original_index = app
             .layout
@@ -507,7 +606,7 @@ mod tests {
         app.layout
             .as_mut()
             .unwrap()
-            .ensure_selected_hunk_ready_sync(&app.session, &[], &[], 0, 0);
+            .ensure_selected_hunk_ready_sync(&app.session, &[], &[], None, 0, 0);
         let remapped_cursor = app
             .layout
             .as_ref()
@@ -531,6 +630,7 @@ mod tests {
             &app.session,
             &[],
             &[],
+            None,
             build_options(1, 1, 0),
         ));
 
@@ -541,6 +641,7 @@ mod tests {
             old_lineno: Some(2),
             new_lineno: Some(2),
             note_id: None,
+            note_row_offset: 0,
         };
         let cursor_context = RowContext {
             file_index: Some(0),
@@ -549,6 +650,7 @@ mod tests {
             old_lineno: Some(3),
             new_lineno: Some(3),
             note_id: None,
+            note_row_offset: 0,
         };
         app.main_pane.selection_anchor = Some(anchor_context);
         app.main_pane.cursor_row = app
@@ -600,6 +702,7 @@ mod tests {
             &app.session,
             &[],
             &[],
+            None,
             build_options(2, 1, 0),
         ));
 
@@ -610,6 +713,7 @@ mod tests {
             old_lineno: Some(3),
             new_lineno: Some(3),
             note_id: None,
+            note_row_offset: 0,
         };
         app.main_pane.cursor_row = app
             .layout
@@ -638,12 +742,113 @@ mod tests {
     }
 
     #[test]
+    fn every_note_row_round_trips_during_cursor_remapping() {
+        let mut app = app_with_hunks(1);
+        app.layout = Some(Layout::build(
+            &app.session,
+            &[],
+            &[],
+            None,
+            build_options(0, 20, 0),
+        ));
+        app.add_note(
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            "a note with enough text to occupy multiple rendered rows".to_string(),
+        );
+
+        let (start, note_len) = {
+            let layout = app.layout.as_ref().unwrap();
+            let insertion = &layout.note_insertions[0];
+            (
+                layout
+                    .row_index_for_context(&app.session, insertion.context)
+                    .unwrap(),
+                insertion.len(),
+            )
+        };
+
+        for offset in 0..note_len {
+            let row = start + offset;
+            let context = app
+                .layout
+                .as_ref()
+                .unwrap()
+                .row_context(&app.session, row)
+                .unwrap();
+            assert_eq!(context.note_row_offset, offset);
+            assert_eq!(
+                app.layout
+                    .as_ref()
+                    .unwrap()
+                    .row_index_for_context(&app.session, context),
+                Some(row)
+            );
+        }
+
+        app.main_pane.cursor_row = start;
+        for expected_row in (start + 1)..=(start + note_len) {
+            let max_row = app.layout.as_ref().unwrap().row_count - 1;
+            app.move_cursor_down(1, max_row);
+            app.refresh_note_overlay();
+            assert_eq!(app.main_pane.cursor_row, expected_row);
+        }
+    }
+
+    #[test]
+    fn contextual_note_input_edits_on_a_note_and_creates_on_the_diff() {
+        let mut app = app_with_hunks(1);
+        app.layout = Some(Layout::build(
+            &app.session,
+            &[],
+            &[],
+            None,
+            build_options(0, 20, 0),
+        ));
+        app.add_note(
+            NoteTarget::Line {
+                file_path: "test.rs".to_string(),
+                old_lineno: Some(1),
+                new_lineno: Some(1),
+            },
+            "remember this".to_string(),
+        );
+        let (note_start, note_len) = {
+            let layout = app.layout.as_ref().unwrap();
+            let insertion = &layout.note_insertions[0];
+            (
+                layout
+                    .row_index_for_context(&app.session, insertion.context)
+                    .unwrap(),
+                insertion.len(),
+            )
+        };
+
+        app.main_pane.cursor_row = note_start + 1;
+        app.start_contextual_note_input();
+        assert_eq!(
+            app.notes.composer_mode(),
+            Some(crate::state::NoteComposerMode::EditPersonal { note_id: 1 })
+        );
+
+        app.cancel_note_input();
+        app.main_pane.cursor_row = note_start + note_len;
+        app.start_contextual_note_input();
+        assert_eq!(
+            app.notes.composer_mode(),
+            Some(crate::state::NoteComposerMode::Create)
+        );
+    }
+
+    #[test]
     fn note_before_hunk_header_does_not_move_hunk_range_to_the_note() {
         let mut app = app_with_hunks(3);
         app.layout = Some(Layout::build(
             &app.session,
             &[],
             &[],
+            None,
             build_options(1, 1, 0),
         ));
 
@@ -662,6 +867,7 @@ mod tests {
             old_lineno: None,
             new_lineno: None,
             note_id: None,
+            note_row_offset: 0,
         };
         let layout = app.layout.as_ref().unwrap();
         let header_row = layout
@@ -678,6 +884,58 @@ mod tests {
         assert_eq!(
             layout.row_context(&app.session, range_start).unwrap(),
             header_context
+        );
+    }
+
+    #[test]
+    fn reply_composer_reserves_rows_inside_the_expanded_agent_note() {
+        let mut app = app_with_hunks(1);
+        app.layout = Some(Layout::build(
+            &app.session,
+            &[],
+            &[],
+            None,
+            build_options(0, 20, 0),
+        ));
+        let mut note = Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "test.rs".to_string(),
+            },
+            AgentProvider::Claude,
+            "Explain this".to_string(),
+            7,
+        );
+        let thread = note.agent_thread_mut().unwrap();
+        assert!(thread.mark_running(7, std::time::Instant::now()));
+        assert!(thread.complete(
+            7,
+            "session-1".to_string(),
+            "It changes the queue.".to_string(),
+        ));
+        app.notes.items.push(note);
+        app.refresh_note_overlay();
+        let note_context = app.layout.as_ref().unwrap().note_insertions[0].context;
+        app.main_pane.cursor_row = app
+            .layout
+            .as_ref()
+            .unwrap()
+            .row_index_for_context(&app.session, note_context)
+            .unwrap();
+
+        app.edit_current_note();
+
+        assert!(app.notes.expanded_ids.contains(&1));
+        let composer_bounds = app.reply_composer_bounds().unwrap();
+        assert_eq!(composer_bounds.len(), 3);
+        assert_eq!(
+            app.layout
+                .as_ref()
+                .unwrap()
+                .row_context(&app.session, composer_bounds.start)
+                .unwrap()
+                .note_id,
+            Some(1)
         );
     }
 }

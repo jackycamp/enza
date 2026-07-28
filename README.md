@@ -27,6 +27,10 @@ enza
 
 TODO
 
+### Install from releases
+
+TODO
+
 ### Install from source
 
 Install the latest source version with Cargo:
@@ -54,12 +58,6 @@ Check the install:
 
 ```sh
 enza --version
-```
-
-Prebuilt release archives, when available, can be downloaded from:
-
-```text
-https://github.com/jackycamp/enza/releases
 ```
 
 ## Features and Usage

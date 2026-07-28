@@ -281,6 +281,7 @@ dependencies = [
  "git2",
  "once_cell",
  "ratatui",
+ "serde_json",
  "syntect",
  "two-face",
 ]

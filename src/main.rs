@@ -1,3 +1,4 @@
+mod agent;
 mod cli;
 mod diff;
 mod highlight;
@@ -22,8 +23,9 @@ use crossterm::{
 use ratatui::{Terminal, prelude::CrosstermBackend};
 
 use crate::{
+    agent::ReviewContext,
     cli::{Cli, Command},
-    diff::{DiffFilter, DiffSession, DiffTarget},
+    diff::{DiffFilter, DiffSession, DiffTarget, discover_repo_root},
     input::NavAction,
     state::{App, FocusPane},
 };
@@ -84,11 +86,14 @@ fn run_app(
     diff_load.field("hunks", session.num_hunks());
     diff_load.field("lines", session.num_lines());
 
-    let mut app = App::new(session);
+    let repo_root = discover_repo_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let mut app =
+        App::new_with_review_context(session, ReviewContext::new(repo_root, diff_target.clone()));
     let first_frame_start = Instant::now();
     let mut first_frame_logged = false;
 
     while app.global.running {
+        app.drain_agent_events();
         let viewport_area = terminal.get_frame().area();
         render::ensure_layout(&mut app, viewport_area);
         app.clamp_cursor_row(render::max_cursor_row(&app));
@@ -137,7 +142,6 @@ fn run_app(
                 NavAction::RevealSelectedHunk => {
                     render::reveal_selected_hunk(&mut app, viewport_area)
                 }
-                NavAction::PromptForNote => app.start_note_input(),
                 NavAction::SyncSelectionToScroll => {
                     app.sync_selection_to_cursor();
                     render::ensure_cursor_visible(&mut app, viewport_area);
