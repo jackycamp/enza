@@ -6,6 +6,9 @@ A fast and efficient terminal-based code diff viewer.
 
 <img width="1902" height="1035" alt="image" src="https://github.com/user-attachments/assets/57919f33-2b19-4de6-86af-c4d80063d447" />
 
+<img width="1906" height="1037" alt="image" src="https://github.com/user-attachments/assets/3e5e5de9-2ba5-4dbe-8888-f08fe45bc8a4" />
+
+
 
 ## Quick start
 
