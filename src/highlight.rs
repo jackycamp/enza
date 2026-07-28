@@ -74,7 +74,9 @@ fn is_supported_path(path: &str) -> bool {
             matches!(
                 ext,
                 "rs" | "js"
+                    | "jsx"
                     | "ts"
+                    | "tsx"
                     | "sh"
                     | "bash"
                     | "md"
