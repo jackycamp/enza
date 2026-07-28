@@ -62,23 +62,7 @@ enza --version
 
 ## Features and Usage
 
-Press `n` in the diff pane to add a note to the current file, hunk, line, or
-selected range. Notes are kept in memory for the current Enza session.
-
-Start a note with `@codex` or `@claude` to ask a read-only coding agent about
-the selected change:
-
-```text
-@codex, explain why this lock is needed
-@claude: check whether this handles the error correctly
-```
-
-Agent replies appear in the note. Press `Enter` to expand or collapse a note.
-Press `n` on a diff row to create a note, on a personal note to edit it, or on
-an agent thread to reply in the same agent session. Press `c` to cancel a
-running request or `r` to retry a failed request. Use `@@codex` or `@@claude`
-when a personal note should begin with a literal agent mention. Enza uses the
-`codex` and `claude` executables on `PATH` and their existing authentication.
+TODO
 
 ## Build and run on macOS
 
