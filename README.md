@@ -4,6 +4,9 @@ A fast and efficient terminal-based code diff viewer.
 
 > enza is still a work-in-progress and is not yet stable, features and functionality are subject to change without notice. Thank you.
 
+<img width="1902" height="1035" alt="image" src="https://github.com/user-attachments/assets/57919f33-2b19-4de6-86af-c4d80063d447" />
+
+
 ## Quick start
 
 ```bash
