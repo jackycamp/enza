@@ -1,6 +1,8 @@
 # enza
 
-A fast and light TUI diff viewer.
+A fast and efficient terminal-based code diff viewer.
+
+> enza is still a work-in-progress and is not yet stable, features and functionality are subject to change without notice. Thank you.
 
 ## Quick start
 
