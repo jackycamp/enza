@@ -75,32 +75,6 @@ impl Layout {
     /// This synchronously builds rows for the selected area so the first frame
     /// has visible content. Later movement should use
     /// `ensure_hunk_window` so already-loaded hunk rows can be reused.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let target = HunkWindowTarget {
-    ///     selected_file: 0,
-    ///     selected_hunk: 2,
-    ///     visible_start_row: None,
-    ///     viewport_rows: 40,
-    ///     overscan_rows: 80,
-    /// };
-    /// let layout = Layout::build(
-    ///     &app.session,
-    ///     &app.notes.items,
-    ///     &app.notes.expanded_ids,
-    ///     app.notes.reply_composer_note_id(),
-    ///     LayoutBuildOptions {
-    ///         widths: LayoutWidths {
-    ///             inline: 80,
-    ///             side_by_side: 120,
-    ///         },
-    ///         target,
-    ///     },
-    /// );
-    /// // -> Layout { inline_width: 80, side_by_side_width: 120, ... }
-    /// ```
     pub fn build(
         session: &DiffSession,
         notes: &[Note],

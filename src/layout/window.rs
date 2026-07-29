@@ -13,63 +13,21 @@ use crate::layout::primitives::LayoutWidths;
 use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
 
 /// Selection and viewport inputs used to choose which hunks are loaded.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let target = HunkWindowTarget {
-///     selected_file: 0,
-///     selected_hunk: 2,
-///     visible_start_row: Some(120),
-///     viewport_rows: 40,
-///     overscan_rows: 80,
-/// };
-/// // -> HunkWindowTarget {
-/// //      selected_file: 0,
-/// //      selected_hunk: 2,
-/// //      visible_start_row: Some(120),
-/// //      viewport_rows: 40,
-/// //      overscan_rows: 80,
-/// //    }
-/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HunkWindowTarget {
+    /// Index of the selected file in `DiffSession`.
     pub selected_file: usize,
+    /// Index of the selected hunk within the selected file.
     pub selected_hunk: usize,
+    /// First visible row in `LayoutPlan`, or `None` during the initial build.
     pub visible_start_row: Option<usize>,
+    /// Number of rows visible from `visible_start_row`.
     pub viewport_rows: usize,
+    /// Number of additional rows to keep ready before and after the viewport.
     pub overscan_rows: usize,
 }
 
-/// Inputs required to build a full layout from scratch.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let options = LayoutBuildOptions {
-///     widths: LayoutWidths {
-///         inline: 80,
-///         side_by_side: 120,
-///     },
-///     target: HunkWindowTarget {
-///         selected_file: 0,
-///         selected_hunk: 2,
-///         visible_start_row: None,
-///         viewport_rows: 40,
-///         overscan_rows: 80,
-///     },
-/// };
-/// // -> LayoutBuildOptions {
-/// //      widths: LayoutWidths { inline: 80, side_by_side: 120 },
-/// //      target: HunkWindowTarget {
-/// //          selected_file: 0,
-/// //          selected_hunk: 2,
-/// //          visible_start_row: None,
-/// //          viewport_rows: 40,
-/// //          overscan_rows: 80,
-/// //      },
-/// //    }
-/// ```
+/// Terminal widths and the initial hunk window for a full layout build.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LayoutBuildOptions {
     pub widths: LayoutWidths,

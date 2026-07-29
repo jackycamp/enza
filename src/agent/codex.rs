@@ -1,3 +1,8 @@
+//! Codex CLI command construction and response parsing.
+//!
+//! Commands run in the repository's read-only sandbox. Responses use Codex's
+//! JSON event stream and retain its thread ID for follow-up requests.
+
 use std::path::Path;
 use std::process::Command;
 

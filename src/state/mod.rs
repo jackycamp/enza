@@ -1,3 +1,10 @@
+//! Mutable state for an active diff review.
+//!
+//! [`App`] owns transitions that affect more than one interface area. Local state
+//! types own local rules. Cross-area transitions keep selection, sidebar
+//! position, layout rows, note anchors and agent runs consistent. State code
+//! does not read terminal events or draw the interface.
+
 mod agent;
 mod global;
 mod main_pane;

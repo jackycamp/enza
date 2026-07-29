@@ -1,3 +1,8 @@
+//! Claude CLI command construction and response parsing.
+//!
+//! Commands run in the repository with read-only tools. Responses use Claude's
+//! JSON output and retain its session ID for follow-up requests.
+
 use std::path::Path;
 use std::process::Command;
 

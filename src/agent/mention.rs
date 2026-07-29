@@ -1,3 +1,8 @@
+//! Provider mention parsing for note input.
+//!
+//! A leading `@codex` or `@claude` mention creates an agent prompt. Other text
+//! creates a personal note, and a doubled `@` escapes a recognised mention.
+
 use crate::note::AgentProvider;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

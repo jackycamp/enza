@@ -1,3 +1,7 @@
+//! Conversion from selected layout rows to review note targets.
+//!
+//! Targets preserve file, hunk and old or new line coordinates from the diff.
+
 use crate::{
     diff::DiffFile,
     layout::{RowContext, RowKind},

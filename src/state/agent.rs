@@ -1,3 +1,10 @@
+//! Application state transitions for agent requests.
+//!
+//! These transitions submit, cancel and retry runs, then reconcile asynchronous
+//! lifecycle events with the state that owns each request. Run IDs prevent stale
+//! events from updating newer work. Accepted events refresh derived interface
+//! state.
+
 use crate::agent::{AgentEvent, AgentRequest, build_agent_prompt};
 use crate::note::{
     AGENT_ACTIVITY_INTERVAL, AgentFailure, AgentProvider, AgentRunState, Note, NoteId, NoteTarget,

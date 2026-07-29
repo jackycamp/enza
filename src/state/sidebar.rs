@@ -1,3 +1,8 @@
+//! Collapsible file-tree state for the sidebar.
+//!
+//! The sidebar derives visible directory and file entries from the diff and
+//! keeps its cursor valid as directories collapse or expand.
+
 use std::collections::HashSet;
 
 use crate::diff::{DiffFile, FileChangeKind};

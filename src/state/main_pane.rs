@@ -1,3 +1,5 @@
+//! Cursor, selection and scrolling state for the main diff pane.
+
 use crate::layout::RowContext;
 
 #[derive(Debug)]

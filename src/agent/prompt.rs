@@ -1,3 +1,8 @@
+//! Review prompt construction for new agent conversations.
+//!
+//! Prompts identify the comparison and selected note target, then include the
+//! relevant diff hunks. Excerpts are capped at 160 lines and 24 KiB.
+
 use std::path::PathBuf;
 
 use crate::diff::{DiffFile, DiffLine, DiffSession, DiffTarget};

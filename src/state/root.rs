@@ -1,3 +1,8 @@
+//! Root application state and cross-area transitions.
+//!
+//! [`App`] coordinates navigation, selection, notes, sidebar focus and derived
+//! layout updates against one diff session.
+
 use std::{ops::Range, sync::Arc};
 
 #[cfg(test)]

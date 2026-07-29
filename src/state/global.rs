@@ -1,3 +1,5 @@
+//! Review-wide interface mode, focus and process state.
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiffMode {
     SideBySide,

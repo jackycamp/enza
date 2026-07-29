@@ -1,3 +1,9 @@
+//! Agent subprocess execution and lifecycle reporting.
+//!
+//! A fixed worker pool runs provider CLIs and emits start, slow, completion,
+//! failure and cancellation events. The runtime enforces cancellation, hard
+//! timeouts and output limits, then sanitises responses for terminal display.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read, Write};

@@ -1,3 +1,15 @@
+//! Git diff loading and the shared diff model.
+//!
+//! `DiffSession::load_from_repo` supports working tree, staged, two-revision and
+//! merge-base comparisons. It converts `git2` patches into the files, hunks and
+//! lines used by the rest of the application. `DiffFilter` follows Git's
+//! diff-filter convention: uppercase letters include statuses and lowercase
+//! letters exclude them.
+//!
+//! Working tree comparisons include untracked files. If `git2` does not provide
+//! a patch for a readable added file, this module creates an all-added hunk from
+//! its contents.
+
 use std::{
     fs,
     path::{Path, PathBuf},

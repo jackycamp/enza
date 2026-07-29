@@ -1,3 +1,10 @@
+//! Agent request lifecycle and provider integration.
+//!
+//! This subsystem queues provider work and reports each run through shared
+//! lifecycle events. Consumers apply those events to their own state; the runtime
+//! does not mutate application features directly. Provider adapters enforce
+//! read-only repository access and preserve session IDs for resumed work.
+
 mod claude;
 mod codex;
 mod mention;

@@ -1,3 +1,8 @@
+//! Review note collection and composer state.
+//!
+//! This state allocates note and agent-run IDs, controls expansion, and applies
+//! create, edit and reply composer rules.
+
 use crate::note::{Note, NoteId, RunId};
 
 pub enum NoteInputResult {
