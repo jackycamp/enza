@@ -11,8 +11,8 @@
 //! resolve to the same pair of trees.
 //!
 //! Working tree comparisons include untracked files. If `git2` does not provide
-//! a patch for a readable added file, this module creates an all-added hunk from
-//! its contents.
+//! text hunks for a readable added file, the full model creates an all-added
+//! hunk and the stats loader counts its lines directly.
 
 use std::{
     collections::HashMap,
@@ -37,6 +37,7 @@ pub struct DiffFilter {
     exclude: Vec<char>,
 }
 
+/// File and line counts for a diff, without its paths, hunks or line text.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DiffStats {
     pub files: usize,
@@ -44,12 +45,14 @@ pub struct DiffStats {
     pub deletions: usize,
 }
 
+/// Holds total counts and counts by Git status so filters can reuse one scan.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DiffStatsBreakdown {
     all: DiffStats,
     by_status: HashMap<char, DiffStats>,
 }
 
+/// Loads diff counts and reuses each result for the lifetime of the loader.
 pub struct DiffStatsLoader<'repo> {
     repo: &'repo Repository,
     workdir: Option<PathBuf>,
@@ -60,6 +63,7 @@ pub struct DiffStatsLoader<'repo> {
 enum DiffStatsKey {
     Worktree,
     Cached,
+    // Resolved trees let different revision names share the same cached diff.
     Trees { old: Oid, new: Oid },
 }
 
@@ -147,6 +151,7 @@ impl DiffSession {
 }
 
 impl DiffStatsBreakdown {
+    /// Returns all counts, or combines the statuses accepted by the filter.
     pub fn stats(&self, diff_filter: Option<&DiffFilter>) -> DiffStats {
         let Some(diff_filter) = diff_filter else {
             return self.all;
@@ -375,6 +380,7 @@ fn collect_diff_stats(
             continue;
         };
 
+        // Read counts from libgit2 without copying hunks and lines into a DiffSession.
         let (_, mut additions, deletions) = patch.line_stats().unwrap_or_default();
         if allow_worktree_fallback
             && patch.num_hunks() == 0
@@ -578,6 +584,7 @@ fn synthetic_added_file_line_count(
     }
 
     let absolute_path = workdir?.join(delta.new_file().path()?);
+    // Read one line at a time instead of keeping the whole untracked file.
     count_utf8_lines(BufReader::new(File::open(absolute_path).ok()?)).ok()
 }
 

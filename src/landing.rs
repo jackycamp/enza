@@ -362,6 +362,7 @@ fn load_landing_data(repo_path: &Path, cancelled: &AtomicBool) -> Option<Landing
             worktree_stats,
         });
     };
+    // Load the worktree once. The M, A and D suggestions reuse these counts.
     let mut stats_loader = DiffStatsLoader::new(&repo);
     let worktree_stats_breakdown = stats_loader.load(&DiffTarget::Worktree).unwrap_or_default();
     let worktree_stats = worktree_stats_breakdown.stats(None);
