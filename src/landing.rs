@@ -24,7 +24,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::diff::{DiffFilter, DiffStats, DiffStatsLoader, DiffTarget};
+use crate::diff::{DiffFilter, DiffStats, DiffStatsBreakdown, DiffStatsLoader, DiffTarget};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const BASELINE_PARTICLE_COUNT: usize = 32;
@@ -57,6 +57,7 @@ struct LandingData {
 struct LandingWorker {
     result_rx: Receiver<LandingData>,
     cancelled: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 struct SuggestionCollector<'a, 'repo> {
@@ -114,7 +115,7 @@ pub fn run_landing_page<B: Backend>(
     app.tick(0.0, terminal.get_frame().area());
     terminal.draw(|frame| render(frame, &app))?;
 
-    let worker = LandingWorker::new(repo_path);
+    let mut worker = LandingWorker::new(repo_path);
 
     loop {
         if let Some(data) = worker.take_result() {
@@ -131,8 +132,14 @@ pub fn run_landing_page<B: Backend>(
         if event::poll(FRAME_INTERVAL)? {
             match handle_event(&mut app, event::read()?) {
                 LandingAction::Continue => {}
-                LandingAction::Quit => return Ok(None),
-                LandingAction::Open(selection) => return Ok(Some(selection)),
+                LandingAction::Quit => {
+                    worker.cancel_and_join();
+                    return Ok(None);
+                }
+                LandingAction::Open(selection) => {
+                    worker.cancel_and_join();
+                    return Ok(Some(selection));
+                }
             }
         }
     }
@@ -213,7 +220,7 @@ impl LandingWorker {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let Some(data) = load(&worker_cancelled) else {
                 return;
             };
@@ -225,17 +232,25 @@ impl LandingWorker {
         Self {
             result_rx,
             cancelled,
+            handle: Some(handle),
         }
     }
 
     fn take_result(&self) -> Option<LandingData> {
         self.result_rx.try_recv().ok()
     }
+
+    fn cancel_and_join(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Drop for LandingWorker {
     fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.cancel_and_join();
     }
 }
 
@@ -364,7 +379,12 @@ fn load_landing_data(repo_path: &Path, cancelled: &AtomicBool) -> Option<Landing
     };
     // Load the worktree once. The M, A and D suggestions reuse these counts.
     let mut stats_loader = DiffStatsLoader::new(&repo);
-    let worktree_stats_breakdown = stats_loader.load(&DiffTarget::Worktree).unwrap_or_default();
+    let worktree_stats_breakdown =
+        match stats_loader.load(&DiffTarget::Worktree, || cancelled.load(Ordering::Relaxed)) {
+            Ok(Some(stats)) => stats,
+            Ok(None) => return None,
+            Err(_) => DiffStatsBreakdown::default(),
+        };
     let worktree_stats = worktree_stats_breakdown.stats(None);
     if cancelled.load(Ordering::Relaxed) {
         return None;
@@ -570,14 +590,14 @@ fn push_changed_suggestion(
         return;
     }
 
-    let Some(stats) = collector
+    let cancelled = collector.cancelled;
+    let Ok(Some(stats)) = collector
         .stats_loader
-        .load(&target)
-        .ok()
-        .map(|stats| stats.stats(diff_filter.as_ref()))
+        .load(&target, || cancelled.load(Ordering::Relaxed))
     else {
         return;
     };
+    let stats = stats.stats(diff_filter.as_ref());
     if collector.cancelled.load(Ordering::Relaxed) {
         return;
     }
@@ -917,7 +937,11 @@ fn centered_width(area: Rect, width: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{atomic::Ordering, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -994,6 +1018,25 @@ mod tests {
 
         assert_eq!(data.suggestions.len(), 1);
         assert_eq!(data.suggestions[0].command, "enza diff");
+    }
+
+    #[test]
+    fn dropping_landing_worker_cancels_and_joins_its_thread() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let worker = LandingWorker::spawn(move |cancelled| {
+            started_tx.send(()).unwrap();
+            while !cancelled.load(Ordering::Relaxed) {
+                thread::yield_now();
+            }
+            stopped_tx.send(()).unwrap();
+            None
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(worker);
+
+        stopped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     #[test]

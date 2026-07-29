@@ -166,6 +166,7 @@ impl DiffSession {
 
         let resolved = ResolvedDiff::resolve(&repo, target)?;
         let diff = resolved.load(&repo)?;
+        let mut never_cancelled = || false;
         let files = walk_diff(
             &diff,
             workdir.as_deref(),
@@ -174,7 +175,9 @@ impl DiffSession {
                 files: Vec::new(),
                 diff_filter,
             },
-        );
+            &mut never_cancelled,
+        )
+        .expect("non-cancellable diff walk must complete");
 
         Ok(Self { files })
     }
@@ -225,21 +228,39 @@ impl<'repo> DiffStatsLoader<'repo> {
         }
     }
 
-    pub fn load(&mut self, target: &DiffTarget) -> Result<DiffStatsBreakdown, git2::Error> {
+    /// Returns `None` when cancelled and never caches partial counts.
+    pub fn load(
+        &mut self,
+        target: &DiffTarget,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<Option<DiffStatsBreakdown>, git2::Error> {
+        if is_cancelled() {
+            return Ok(None);
+        }
+
         let resolved = ResolvedDiff::resolve(self.repo, target)?;
+        if is_cancelled() {
+            return Ok(None);
+        }
         if let Some(stats) = self.cache.get(&resolved) {
-            return Ok(stats.clone());
+            return Ok(Some(stats.clone()));
         }
 
         let diff = resolved.load(self.repo)?;
-        let stats = walk_diff(
+        if is_cancelled() {
+            return Ok(None);
+        }
+        let Some(stats) = walk_diff(
             &diff,
             self.workdir.as_deref(),
             resolved.allows_worktree_fallback(),
             DiffStatsCollector::default(),
-        );
+            &mut is_cancelled,
+        ) else {
+            return Ok(None);
+        };
         self.cache.insert(resolved, stats.clone());
-        Ok(stats)
+        Ok(Some(stats))
     }
 }
 
@@ -349,6 +370,9 @@ impl DiffFile {
 }
 
 impl ResolvedDiff {
+    /// Resolves revision names and merge bases once.
+    ///
+    /// Worktree and cached targets capture the current HEAD tree.
     fn resolve(repo: &Repository, target: &DiffTarget) -> Result<Self, git2::Error> {
         match target {
             DiffTarget::Worktree => Ok(Self::Worktree {
@@ -374,6 +398,7 @@ impl ResolvedDiff {
         }
     }
 
+    /// Builds the git diff without parsing the original target again.
     fn load<'repo>(&self, repo: &'repo Repository) -> Result<GitDiff<'repo>, git2::Error> {
         match *self {
             Self::Worktree { head } => {
@@ -420,8 +445,16 @@ fn walk_diff<C: DiffCollector>(
     workdir: Option<&Path>,
     allow_worktree_fallback: bool,
     mut collector: C,
-) -> C::Output {
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Option<C::Output> {
+    if is_cancelled() {
+        return None;
+    }
+
     for (index, delta) in diff.deltas().enumerate() {
+        if is_cancelled() {
+            return None;
+        }
         if !collector.includes(delta.status()) {
             continue;
         }
@@ -434,6 +467,9 @@ fn walk_diff<C: DiffCollector>(
         let mut saw_hunk = false;
 
         for hunk_index in 0..patch.num_hunks() {
+            if is_cancelled() {
+                return None;
+            }
             let Ok((hunk, line_count)) = patch.hunk(hunk_index) else {
                 continue;
             };
@@ -441,6 +477,9 @@ fn walk_diff<C: DiffCollector>(
             collector.begin_hunk(hunk.header());
 
             for line_index in 0..line_count {
+                if is_cancelled() {
+                    return None;
+                }
                 let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else {
                     continue;
                 };
@@ -465,33 +504,44 @@ fn walk_diff<C: DiffCollector>(
             }
         }
 
-        if allow_worktree_fallback && !saw_hunk {
-            walk_synthetic_added_file(workdir, &delta, &mut collector);
+        if allow_worktree_fallback
+            && !saw_hunk
+            && !walk_synthetic_added_file(workdir, &delta, &mut collector, is_cancelled)
+        {
+            return None;
         }
 
         collector.finish_file();
     }
 
-    collector.finish()
+    if is_cancelled() {
+        None
+    } else {
+        Some(collector.finish())
+    }
 }
 
 fn walk_synthetic_added_file<C: DiffCollector>(
     workdir: Option<&Path>,
     delta: &git2::DiffDelta<'_>,
     collector: &mut C,
-) {
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> bool {
+    if is_cancelled() {
+        return false;
+    }
     if !matches!(delta.status(), Delta::Added | Delta::Untracked) {
-        return;
+        return true;
     }
 
     let Some(absolute_path) = workdir
         .zip(delta.new_file().path())
         .map(|(workdir, path)| workdir.join(path))
     else {
-        return;
+        return true;
     };
     let Ok(file) = File::open(absolute_path) else {
-        return;
+        return true;
     };
 
     collector.begin_synthetic_hunk();
@@ -500,10 +550,14 @@ fn walk_synthetic_added_file<C: DiffCollector>(
     let mut new_lineno = 0;
 
     loop {
+        if is_cancelled() {
+            collector.discard_synthetic_hunk();
+            return false;
+        }
         match reader.read_line(&mut line) {
             Ok(0) => {
                 collector.finish_synthetic_hunk();
-                return;
+                return true;
             }
             Ok(_) => {
                 new_lineno += 1;
@@ -519,7 +573,7 @@ fn walk_synthetic_added_file<C: DiffCollector>(
             }
             Err(_) => {
                 collector.discard_synthetic_hunk();
-                return;
+                return true;
             }
         }
     }
@@ -754,6 +808,7 @@ fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         fs,
         path::{Path, PathBuf},
         process,
@@ -851,10 +906,19 @@ mod tests {
         summary
     }
 
+    fn load_stats(
+        loader: &mut DiffStatsLoader<'_>,
+        target: &DiffTarget,
+    ) -> Result<DiffStatsBreakdown, git2::Error> {
+        Ok(loader
+            .load(target, || false)?
+            .expect("non-cancellable test load must complete"))
+    }
+
     fn assert_target_stats_match(fixture: &TestRepo, target: &DiffTarget) -> DiffStatsBreakdown {
         let repo = fixture.open();
         let mut loader = DiffStatsLoader::new(&repo);
-        let stats = loader.load(target).expect("load diff stats");
+        let stats = load_stats(&mut loader, target).expect("load diff stats");
 
         let full_session =
             DiffSession::load_from_repo(fixture.path(), target, None).expect("load full diff");
@@ -1073,12 +1137,48 @@ mod tests {
         let session_error = DiffSession::load_from_repo(fixture.path(), &target, None)
             .expect_err("full diff should reject an invalid revision");
         let repo = fixture.open();
-        let stats_error = DiffStatsLoader::new(&repo)
-            .load(&target)
-            .expect_err("stats should reject an invalid revision");
+        let mut loader = DiffStatsLoader::new(&repo);
+        let stats_error =
+            load_stats(&mut loader, &target).expect_err("stats should reject an invalid revision");
 
         assert_eq!(stats_error.code(), session_error.code());
         assert_eq!(stats_error.class(), session_error.class());
+    }
+
+    #[test]
+    fn cancelled_stats_walk_discards_partial_results() {
+        let fixture = TestRepo::new();
+        fs::write(fixture.path().join("modified.txt"), "before\nafter\n")
+            .expect("modify cancellation fixture");
+        fs::write(fixture.path().join("untracked.txt"), "first\nsecond\n")
+            .expect("write cancellation fixture");
+
+        let repo = fixture.open();
+        let mut loader = DiffStatsLoader::new(&repo);
+        let checks = Cell::new(0);
+        let cancelled = loader
+            .load(&DiffTarget::Worktree, || {
+                let next = checks.get() + 1;
+                checks.set(next);
+                next >= 6
+            })
+            .expect("cancel stats load");
+
+        assert!(cancelled.is_none());
+        assert!(checks.get() >= 6);
+        assert!(loader.cache.is_empty());
+
+        let completed =
+            load_stats(&mut loader, &DiffTarget::Worktree).expect("retry cancelled stats load");
+        assert_eq!(
+            completed.stats(None),
+            DiffStats {
+                files: 2,
+                additions: 3,
+                deletions: 0,
+            }
+        );
+        assert_eq!(loader.cache.len(), 1);
     }
 
     #[test]
@@ -1087,12 +1187,8 @@ mod tests {
         let repo = fixture.open();
         let mut loader = DiffStatsLoader::new(&repo);
 
-        loader
-            .load(&DiffTarget::Worktree)
-            .expect("load worktree summary");
-        loader
-            .load(&DiffTarget::Worktree)
-            .expect("reuse worktree summary");
+        load_stats(&mut loader, &DiffTarget::Worktree).expect("load worktree summary");
+        load_stats(&mut loader, &DiffTarget::Worktree).expect("reuse worktree summary");
         assert_eq!(loader.cache.len(), 1);
 
         let head_to_head = DiffTarget::Range {
@@ -1103,20 +1199,15 @@ mod tests {
             base: "main".to_string(),
             head: "HEAD".to_string(),
         };
-        loader
-            .load(&head_to_head)
-            .expect("load first equivalent tree summary");
-        loader
-            .load(&main_to_head)
-            .expect("reuse equivalent tree summary");
+        load_stats(&mut loader, &head_to_head).expect("load first equivalent tree summary");
+        load_stats(&mut loader, &main_to_head).expect("reuse equivalent tree summary");
         assert_eq!(loader.cache.len(), 2);
 
         let main_merge_base_to_head = DiffTarget::MergeBaseRange {
             base: "main".to_string(),
             head: "HEAD".to_string(),
         };
-        loader
-            .load(&main_merge_base_to_head)
+        load_stats(&mut loader, &main_merge_base_to_head)
             .expect("reuse range summary for equivalent merge-base trees");
         assert_eq!(loader.cache.len(), 2);
     }
