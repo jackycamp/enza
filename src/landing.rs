@@ -24,7 +24,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::diff::{DiffFilter, DiffSession, DiffTarget};
+use crate::diff::{DiffFilter, DiffStats, DiffStatsLoader, DiffTarget};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const BASELINE_PARTICLE_COUNT: usize = 32;
@@ -59,10 +59,10 @@ struct LandingWorker {
     cancelled: Arc<AtomicBool>,
 }
 
-struct SuggestionCollector<'a> {
+struct SuggestionCollector<'a, 'repo> {
     suggestions: Vec<LandingSuggestion>,
     seen: HashSet<String>,
-    repo_path: &'a Path,
+    stats_loader: &'a mut DiffStatsLoader<'repo>,
     cancelled: &'a AtomicBool,
 }
 
@@ -79,14 +79,6 @@ struct LandingSuggestion {
     detail: String,
     target: DiffTarget,
     diff_filter: Option<DiffFilter>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct DiffStats {
-    files: usize,
-    hunks: usize,
-    additions: usize,
-    deletions: usize,
 }
 
 struct ParticleField {
@@ -360,12 +352,24 @@ impl TinyRng {
 }
 
 fn load_landing_data(repo_path: &Path, cancelled: &AtomicBool) -> Option<LandingData> {
-    let worktree_stats = load_stats(repo_path, &DiffTarget::Worktree, None).unwrap_or_default();
+    let Ok(repo) = Repository::discover(repo_path) else {
+        let worktree_stats = DiffStats::default();
+        let mut suggestions = Vec::new();
+        let mut seen = HashSet::new();
+        push_worktree_suggestion(&mut suggestions, &mut seen, worktree_stats);
+        return Some(LandingData {
+            suggestions,
+            worktree_stats,
+        });
+    };
+    let mut stats_loader = DiffStatsLoader::new(&repo);
+    let worktree_stats_breakdown = stats_loader.load(&DiffTarget::Worktree).unwrap_or_default();
+    let worktree_stats = worktree_stats_breakdown.stats(None);
     if cancelled.load(Ordering::Relaxed) {
         return None;
     }
 
-    let suggestions = build_suggestions(repo_path, worktree_stats, cancelled);
+    let suggestions = build_suggestions(&repo, &mut stats_loader, worktree_stats, cancelled);
     if cancelled.load(Ordering::Relaxed) {
         return None;
     }
@@ -377,14 +381,15 @@ fn load_landing_data(repo_path: &Path, cancelled: &AtomicBool) -> Option<Landing
 }
 
 fn build_suggestions(
-    repo_path: &Path,
+    repo: &Repository,
+    stats_loader: &mut DiffStatsLoader<'_>,
     worktree_stats: DiffStats,
     cancelled: &AtomicBool,
 ) -> Vec<LandingSuggestion> {
     let mut collector = SuggestionCollector {
         suggestions: Vec::new(),
         seen: HashSet::new(),
-        repo_path,
+        stats_loader,
         cancelled,
     };
     push_worktree_suggestion(
@@ -401,84 +406,82 @@ fn build_suggestions(
         "Staged for the next commit",
     );
 
-    if let Ok(repo) = Repository::discover(repo_path) {
-        if let Some(upstream) = current_upstream(&repo) {
+    if let Some(upstream) = current_upstream(repo) {
+        push_changed_suggestion(
+            &mut collector,
+            "Review branch changes since upstream".to_string(),
+            format!("enza diff {upstream}...HEAD"),
+            DiffTarget::MergeBaseRange {
+                base: upstream.clone(),
+                head: "HEAD".to_string(),
+            },
+            None,
+            "Compared from the merge base with upstream",
+        );
+        push_changed_suggestion(
+            &mut collector,
+            "Review unpushed commits".to_string(),
+            format!("enza diff {upstream}..HEAD"),
+            DiffTarget::Range {
+                base: upstream.clone(),
+                head: "HEAD".to_string(),
+            },
+            None,
+            "Commits on this branch that are not upstream",
+        );
+        push_changed_suggestion(
+            &mut collector,
+            "Review incoming upstream changes".to_string(),
+            format!("enza diff HEAD..{upstream}"),
+            DiffTarget::Range {
+                base: "HEAD".to_string(),
+                head: upstream,
+            },
+            None,
+            "Upstream commits not in this branch",
+        );
+    }
+
+    for base in ["main", "master"] {
+        if revision_exists(repo, base) {
             push_changed_suggestion(
                 &mut collector,
-                "Review branch changes since upstream".to_string(),
-                format!("enza diff {upstream}...HEAD"),
+                format!("Review branch changes since {base}"),
+                format!("enza diff {base}...HEAD"),
                 DiffTarget::MergeBaseRange {
-                    base: upstream.clone(),
+                    base: base.to_string(),
                     head: "HEAD".to_string(),
                 },
                 None,
-                "Compared from the merge base with upstream",
+                &format!("Compared from the merge base with {base}"),
             );
+        }
+    }
+
+    for (base, title, context) in [
+        (
+            "HEAD~1",
+            "Review the last commit",
+            "Changes introduced by the most recent commit",
+        ),
+        (
+            "HEAD~5",
+            "Review recent commits",
+            "Changes across the last five commits",
+        ),
+    ] {
+        if revision_exists(repo, base) {
             push_changed_suggestion(
                 &mut collector,
-                "Review unpushed commits".to_string(),
-                format!("enza diff {upstream}..HEAD"),
+                title.to_string(),
+                format!("enza diff {base}..HEAD"),
                 DiffTarget::Range {
-                    base: upstream.clone(),
+                    base: base.to_string(),
                     head: "HEAD".to_string(),
                 },
                 None,
-                "Commits on this branch that are not upstream",
+                context,
             );
-            push_changed_suggestion(
-                &mut collector,
-                "Review incoming upstream changes".to_string(),
-                format!("enza diff HEAD..{upstream}"),
-                DiffTarget::Range {
-                    base: "HEAD".to_string(),
-                    head: upstream,
-                },
-                None,
-                "Upstream commits not in this branch",
-            );
-        }
-
-        for base in ["main", "master"] {
-            if revision_exists(&repo, base) {
-                push_changed_suggestion(
-                    &mut collector,
-                    format!("Review branch changes since {base}"),
-                    format!("enza diff {base}...HEAD"),
-                    DiffTarget::MergeBaseRange {
-                        base: base.to_string(),
-                        head: "HEAD".to_string(),
-                    },
-                    None,
-                    &format!("Compared from the merge base with {base}"),
-                );
-            }
-        }
-
-        for (base, title, context) in [
-            (
-                "HEAD~1",
-                "Review the last commit",
-                "Changes introduced by the most recent commit",
-            ),
-            (
-                "HEAD~5",
-                "Review recent commits",
-                "Changes across the last five commits",
-            ),
-        ] {
-            if revision_exists(&repo, base) {
-                push_changed_suggestion(
-                    &mut collector,
-                    title.to_string(),
-                    format!("enza diff {base}..HEAD"),
-                    DiffTarget::Range {
-                        base: base.to_string(),
-                        head: "HEAD".to_string(),
-                    },
-                    None,
-                    context,
-                );
-            }
         }
     }
 
@@ -551,7 +554,7 @@ fn loading_worktree_suggestion() -> LandingSuggestion {
 }
 
 fn push_changed_suggestion(
-    collector: &mut SuggestionCollector<'_>,
+    collector: &mut SuggestionCollector<'_, '_>,
     title: String,
     command: String,
     target: DiffTarget,
@@ -566,7 +569,12 @@ fn push_changed_suggestion(
         return;
     }
 
-    let Some(stats) = load_stats(collector.repo_path, &target, diff_filter.as_ref()) else {
+    let Some(stats) = collector
+        .stats_loader
+        .load(&target)
+        .ok()
+        .map(|stats| stats.stats(diff_filter.as_ref()))
+    else {
         return;
     };
     if collector.cancelled.load(Ordering::Relaxed) {
@@ -584,31 +592,6 @@ fn push_changed_suggestion(
         target,
         diff_filter,
     });
-}
-
-fn load_stats(
-    repo_path: &Path,
-    target: &DiffTarget,
-    diff_filter: Option<&DiffFilter>,
-) -> Option<DiffStats> {
-    let session = DiffSession::load_from_repo(repo_path, target, diff_filter).ok()?;
-    Some(stats_for_session(&session))
-}
-
-fn stats_for_session(session: &DiffSession) -> DiffStats {
-    let mut stats = DiffStats {
-        files: session.files.len(),
-        ..DiffStats::default()
-    };
-
-    for file in &session.files {
-        stats.hunks += file.hunks.len();
-        let (additions, deletions) = file.change_counts();
-        stats.additions += additions;
-        stats.deletions += deletions;
-    }
-
-    stats
 }
 
 fn current_upstream(repo: &Repository) -> Option<String> {
@@ -629,7 +612,7 @@ fn revision_exists(repo: &Repository, revision: &str) -> bool {
 
 impl DiffStats {
     fn has_changes(self) -> bool {
-        self.files > 0 || self.hunks > 0 || self.additions > 0 || self.deletions > 0
+        self.files > 0 || self.additions > 0 || self.deletions > 0
     }
 
     fn summary(self) -> String {
@@ -938,10 +921,10 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::{
-        BASELINE_PARTICLE_COUNT, DiffStats, LandingApp, LandingData, LandingSuggestion,
-        LandingWorker, MAX_PARTICLE_COUNT, particle_count, render,
+        BASELINE_PARTICLE_COUNT, LandingApp, LandingData, LandingSuggestion, LandingWorker,
+        MAX_PARTICLE_COUNT, particle_count, render,
     };
-    use crate::diff::DiffTarget;
+    use crate::diff::{DiffStats, DiffTarget};
 
     #[test]
     fn landing_starts_with_an_openable_worktree_while_loading() {
@@ -1027,7 +1010,6 @@ mod tests {
                 files: 2,
                 additions: 16,
                 deletions: 0,
-                ..DiffStats::default()
             }),
             BASELINE_PARTICLE_COUNT + 4
         );
@@ -1037,7 +1019,6 @@ mod tests {
                 files: MAX_PARTICLE_COUNT.saturating_mul(2),
                 additions: 0,
                 deletions: 0,
-                ..DiffStats::default()
             }),
             MAX_PARTICLE_COUNT
         );
