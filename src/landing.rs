@@ -2,6 +2,12 @@ use std::{
     collections::HashSet,
     io,
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -41,6 +47,23 @@ struct LandingApp {
     suggestions: Vec<LandingSuggestion>,
     selected: usize,
     particles: ParticleField,
+}
+
+struct LandingData {
+    suggestions: Vec<LandingSuggestion>,
+    worktree_stats: DiffStats,
+}
+
+struct LandingWorker {
+    result_rx: Receiver<LandingData>,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct SuggestionCollector<'a> {
+    suggestions: Vec<LandingSuggestion>,
+    seen: HashSet<String>,
+    repo_path: &'a Path,
+    cancelled: &'a AtomicBool,
 }
 
 enum LandingAction {
@@ -93,10 +116,19 @@ pub fn run_landing_page<B: Backend>(
     terminal: &mut Terminal<B>,
     repo_path: &Path,
 ) -> io::Result<Option<LandingSelection>> {
-    let mut app = LandingApp::new(repo_path);
+    let mut app = LandingApp::new();
     let mut last_tick = Instant::now();
 
+    app.tick(0.0, terminal.get_frame().area());
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let worker = LandingWorker::new(repo_path);
+
     loop {
+        if let Some(data) = worker.take_result() {
+            app.apply_data(data);
+        }
+
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f32().min(0.25);
         last_tick = now;
@@ -115,13 +147,30 @@ pub fn run_landing_page<B: Backend>(
 }
 
 impl LandingApp {
-    fn new(repo_path: &Path) -> Self {
-        let worktree_stats = load_stats(repo_path, &DiffTarget::Worktree, None).unwrap_or_default();
+    fn new() -> Self {
         Self {
-            suggestions: build_suggestions(repo_path, worktree_stats),
+            suggestions: vec![loading_worktree_suggestion()],
             selected: 0,
-            particles: ParticleField::new(worktree_stats),
+            particles: ParticleField::new(DiffStats::default()),
         }
+    }
+
+    fn apply_data(&mut self, data: LandingData) {
+        let selected_command = self
+            .suggestions
+            .get(self.selected)
+            .map(|suggestion| suggestion.command.as_str());
+        let selected = selected_command
+            .and_then(|command| {
+                data.suggestions
+                    .iter()
+                    .position(|suggestion| suggestion.command == command)
+            })
+            .unwrap_or(0);
+
+        self.suggestions = data.suggestions;
+        self.selected = selected.min(self.suggestions.len().saturating_sub(1));
+        self.particles = ParticleField::new(data.worktree_stats);
     }
 
     fn next(&mut self) {
@@ -155,6 +204,46 @@ impl LandingApp {
 
     fn tick(&mut self, dt: f32, area: Rect) {
         self.particles.update(dt, area);
+    }
+}
+
+impl LandingWorker {
+    fn new(repo_path: &Path) -> Self {
+        let repo_path = repo_path.to_path_buf();
+        Self::spawn(move |cancelled| load_landing_data(&repo_path, cancelled))
+    }
+
+    fn spawn<F>(load: F) -> Self
+    where
+        F: FnOnce(&AtomicBool) -> Option<LandingData> + Send + 'static,
+    {
+        let (result_tx, result_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+
+        thread::spawn(move || {
+            let Some(data) = load(&worker_cancelled) else {
+                return;
+            };
+            if !worker_cancelled.load(Ordering::Relaxed) {
+                let _ = result_tx.send(data);
+            }
+        });
+
+        Self {
+            result_rx,
+            cancelled,
+        }
+    }
+
+    fn take_result(&self) -> Option<LandingData> {
+        self.result_rx.try_recv().ok()
+    }
+}
+
+impl Drop for LandingWorker {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
     }
 }
 
@@ -270,15 +359,41 @@ impl TinyRng {
     }
 }
 
-fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<LandingSuggestion> {
-    let mut suggestions = Vec::new();
-    let mut seen = HashSet::new();
+fn load_landing_data(repo_path: &Path, cancelled: &AtomicBool) -> Option<LandingData> {
+    let worktree_stats = load_stats(repo_path, &DiffTarget::Worktree, None).unwrap_or_default();
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
 
-    push_worktree_suggestion(&mut suggestions, &mut seen, worktree_stats);
-    push_changed_suggestion(
-        &mut suggestions,
-        &mut seen,
+    let suggestions = build_suggestions(repo_path, worktree_stats, cancelled);
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    Some(LandingData {
+        suggestions,
+        worktree_stats,
+    })
+}
+
+fn build_suggestions(
+    repo_path: &Path,
+    worktree_stats: DiffStats,
+    cancelled: &AtomicBool,
+) -> Vec<LandingSuggestion> {
+    let mut collector = SuggestionCollector {
+        suggestions: Vec::new(),
+        seen: HashSet::new(),
         repo_path,
+        cancelled,
+    };
+    push_worktree_suggestion(
+        &mut collector.suggestions,
+        &mut collector.seen,
+        worktree_stats,
+    );
+    push_changed_suggestion(
+        &mut collector,
         "Review staged changes".to_string(),
         "enza diff --cached".to_string(),
         DiffTarget::Cached,
@@ -289,9 +404,7 @@ fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<Landing
     if let Ok(repo) = Repository::discover(repo_path) {
         if let Some(upstream) = current_upstream(&repo) {
             push_changed_suggestion(
-                &mut suggestions,
-                &mut seen,
-                repo_path,
+                &mut collector,
                 "Review branch changes since upstream".to_string(),
                 format!("enza diff {upstream}...HEAD"),
                 DiffTarget::MergeBaseRange {
@@ -302,9 +415,7 @@ fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<Landing
                 "Compared from the merge base with upstream",
             );
             push_changed_suggestion(
-                &mut suggestions,
-                &mut seen,
-                repo_path,
+                &mut collector,
                 "Review unpushed commits".to_string(),
                 format!("enza diff {upstream}..HEAD"),
                 DiffTarget::Range {
@@ -315,9 +426,7 @@ fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<Landing
                 "Commits on this branch that are not upstream",
             );
             push_changed_suggestion(
-                &mut suggestions,
-                &mut seen,
-                repo_path,
+                &mut collector,
                 "Review incoming upstream changes".to_string(),
                 format!("enza diff HEAD..{upstream}"),
                 DiffTarget::Range {
@@ -332,9 +441,7 @@ fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<Landing
         for base in ["main", "master"] {
             if revision_exists(&repo, base) {
                 push_changed_suggestion(
-                    &mut suggestions,
-                    &mut seen,
-                    repo_path,
+                    &mut collector,
                     format!("Review branch changes since {base}"),
                     format!("enza diff {base}...HEAD"),
                     DiffTarget::MergeBaseRange {
@@ -361,9 +468,7 @@ fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<Landing
         ] {
             if revision_exists(&repo, base) {
                 push_changed_suggestion(
-                    &mut suggestions,
-                    &mut seen,
-                    repo_path,
+                    &mut collector,
                     title.to_string(),
                     format!("enza diff {base}..HEAD"),
                     DiffTarget::Range {
@@ -398,9 +503,7 @@ fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<Landing
             continue;
         };
         push_changed_suggestion(
-            &mut suggestions,
-            &mut seen,
-            repo_path,
+            &mut collector,
             title.to_string(),
             format!("enza diff --diff-filter {filter}"),
             DiffTarget::Worktree,
@@ -409,7 +512,7 @@ fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<Landing
         );
     }
 
-    suggestions
+    collector.suggestions
 }
 
 fn push_worktree_suggestion(
@@ -437,29 +540,44 @@ fn push_worktree_suggestion(
     });
 }
 
+fn loading_worktree_suggestion() -> LandingSuggestion {
+    LandingSuggestion {
+        title: "Review your working tree".to_string(),
+        command: "enza diff".to_string(),
+        detail: "Calculating repository changes...".to_string(),
+        target: DiffTarget::Worktree,
+        diff_filter: None,
+    }
+}
+
 fn push_changed_suggestion(
-    suggestions: &mut Vec<LandingSuggestion>,
-    seen: &mut HashSet<String>,
-    repo_path: &Path,
+    collector: &mut SuggestionCollector<'_>,
     title: String,
     command: String,
     target: DiffTarget,
     diff_filter: Option<DiffFilter>,
     context: &str,
 ) {
-    if !seen.insert(command.clone()) {
+    if collector.cancelled.load(Ordering::Relaxed) {
         return;
     }
 
-    let Some(stats) = load_stats(repo_path, &target, diff_filter.as_ref()) else {
+    if !collector.seen.insert(command.clone()) {
+        return;
+    }
+
+    let Some(stats) = load_stats(collector.repo_path, &target, diff_filter.as_ref()) else {
         return;
     };
+    if collector.cancelled.load(Ordering::Relaxed) {
+        return;
+    }
 
     if !stats.has_changes() {
         return;
     }
 
-    suggestions.push(LandingSuggestion {
+    collector.suggestions.push(LandingSuggestion {
         title,
         command,
         detail: format!("{context}. {}", stats.summary()),
@@ -815,7 +933,84 @@ fn centered_width(area: Rect, width: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::{BASELINE_PARTICLE_COUNT, DiffStats, MAX_PARTICLE_COUNT, particle_count};
+    use std::time::Duration;
+
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::{
+        BASELINE_PARTICLE_COUNT, DiffStats, LandingApp, LandingData, LandingSuggestion,
+        LandingWorker, MAX_PARTICLE_COUNT, particle_count, render,
+    };
+    use crate::diff::DiffTarget;
+
+    #[test]
+    fn landing_starts_with_an_openable_worktree_while_loading() {
+        let app = LandingApp::new();
+
+        assert_eq!(app.suggestions.len(), 1);
+        assert_eq!(app.suggestions[0].command, "enza diff");
+        assert_eq!(
+            app.suggestions[0].detail,
+            "Calculating repository changes..."
+        );
+        assert_eq!(app.select().unwrap().target, DiffTarget::Worktree);
+    }
+
+    #[test]
+    fn initial_frame_renders_the_loading_state() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = LandingApp::new();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Calculating repository changes..."));
+    }
+
+    #[test]
+    fn loaded_suggestions_replace_the_placeholder_and_preserve_selection() {
+        let mut app = LandingApp::new();
+        app.apply_data(LandingData {
+            suggestions: vec![
+                suggestion("enza diff --cached", DiffTarget::Cached),
+                suggestion("enza diff", DiffTarget::Worktree),
+            ],
+            worktree_stats: DiffStats {
+                files: 2,
+                additions: 16,
+                ..DiffStats::default()
+            },
+        });
+
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.select().unwrap().target, DiffTarget::Worktree);
+        assert_eq!(app.particles.particles.len(), BASELINE_PARTICLE_COUNT + 4);
+    }
+
+    #[test]
+    fn landing_worker_publishes_loaded_data() {
+        let worker = LandingWorker::spawn(|_| {
+            Some(LandingData {
+                suggestions: vec![suggestion("enza diff", DiffTarget::Worktree)],
+                worktree_stats: DiffStats::default(),
+            })
+        });
+
+        let data = worker
+            .result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(data.suggestions.len(), 1);
+        assert_eq!(data.suggestions[0].command, "enza diff");
+    }
 
     #[test]
     fn particle_count_keeps_a_baseline_for_clean_worktrees() {
@@ -846,5 +1041,15 @@ mod tests {
             }),
             MAX_PARTICLE_COUNT
         );
+    }
+
+    fn suggestion(command: &str, target: DiffTarget) -> LandingSuggestion {
+        LandingSuggestion {
+            title: "Review changes".to_string(),
+            command: command.to_string(),
+            detail: "Details".to_string(),
+            target,
+            diff_filter: None,
+        }
     }
 }
