@@ -6,18 +6,19 @@
 //! diff-filter convention: uppercase letters include statuses and lowercase
 //! letters exclude them.
 //!
-//! `DiffStatsLoader` calculates only file and line totals. It caches
-//! worktree and index scans and reuses results for revision comparisons that
-//! resolve to the same pair of trees.
+//! `DiffSession` and `DiffStatsLoader` resolve targets and walk patches through
+//! the same path. The stats loader keeps only file and line totals. It caches
+//! worktree and index scans and reuses revision comparisons that resolve to the
+//! same pair of trees.
 //!
 //! Working tree comparisons include untracked files. If `git2` does not provide
-//! text hunks for a readable added file, the full model creates an all-added
-//! hunk and the stats loader counts its lines directly.
+//! text hunks for a readable added file, the shared walker emits an all-added
+//! hunk.
 
 use std::{
     collections::HashMap,
-    fs::{self, File},
-    io::{self, BufRead, BufReader},
+    fs::File,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
@@ -56,13 +57,14 @@ pub struct DiffStatsBreakdown {
 pub struct DiffStatsLoader<'repo> {
     repo: &'repo Repository,
     workdir: Option<PathBuf>,
-    cache: HashMap<DiffStatsKey, DiffStatsBreakdown>,
+    cache: HashMap<ResolvedDiff, DiffStatsBreakdown>,
 }
 
+/// A diff target reduced to the repository objects used for its comparison.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum DiffStatsKey {
-    Worktree,
-    Cached,
+enum ResolvedDiff {
+    Worktree { head: Option<Oid> },
+    Cached { head: Option<Oid> },
     // Resolved trees let different revision names share the same cached diff.
     Trees { old: Oid, new: Oid },
 }
@@ -110,6 +112,49 @@ pub enum DiffLine {
     },
 }
 
+enum WalkedDiffLine<'a> {
+    Context {
+        old_lineno: usize,
+        new_lineno: usize,
+        text: &'a [u8],
+    },
+    Added {
+        new_lineno: usize,
+        text: &'a [u8],
+    },
+    Removed {
+        old_lineno: usize,
+        text: &'a [u8],
+    },
+}
+
+/// Receives the canonical patch walk and decides which data to retain.
+trait DiffCollector {
+    type Output;
+
+    fn includes(&self, status: Delta) -> bool;
+    fn begin_file(&mut self, delta: &git2::DiffDelta<'_>);
+    fn begin_hunk(&mut self, header: &[u8]);
+    fn line(&mut self, line: WalkedDiffLine<'_>);
+    fn begin_synthetic_hunk(&mut self);
+    fn finish_synthetic_hunk(&mut self);
+    fn discard_synthetic_hunk(&mut self);
+    fn finish_file(&mut self);
+    fn finish(self) -> Self::Output;
+}
+
+struct DiffSessionCollector<'filter> {
+    files: Vec<DiffFile>,
+    diff_filter: Option<&'filter DiffFilter>,
+}
+
+#[derive(Default)]
+struct DiffStatsCollector {
+    stats: DiffStatsBreakdown,
+    current: Option<(char, DiffStats)>,
+    synthetic_additions_start: Option<usize>,
+}
+
 impl DiffSession {
     pub fn load_from_repo(
         path: impl AsRef<Path>,
@@ -119,12 +164,16 @@ impl DiffSession {
         let repo = Repository::discover(path)?;
         let workdir = repo.workdir().map(|path| path.to_path_buf());
 
-        let diff = load_git_diff(&repo, target)?;
-        let files = collect_diff_files(
+        let resolved = ResolvedDiff::resolve(&repo, target)?;
+        let diff = resolved.load(&repo)?;
+        let files = walk_diff(
             &diff,
             workdir.as_deref(),
-            matches!(target, DiffTarget::Worktree),
-            diff_filter,
+            resolved.allows_worktree_fallback(),
+            DiffSessionCollector {
+                files: Vec::new(),
+                diff_filter,
+            },
         );
 
         Ok(Self { files })
@@ -177,25 +226,19 @@ impl<'repo> DiffStatsLoader<'repo> {
     }
 
     pub fn load(&mut self, target: &DiffTarget) -> Result<DiffStatsBreakdown, git2::Error> {
-        let key = diff_stats_key(self.repo, target)?;
-        if let Some(stats) = self.cache.get(&key) {
+        let resolved = ResolvedDiff::resolve(self.repo, target)?;
+        if let Some(stats) = self.cache.get(&resolved) {
             return Ok(stats.clone());
         }
 
-        let diff = match key {
-            DiffStatsKey::Worktree | DiffStatsKey::Cached => load_git_diff(self.repo, target)?,
-            DiffStatsKey::Trees { old, new } => {
-                let old_tree = self.repo.find_tree(old)?;
-                let new_tree = self.repo.find_tree(new)?;
-                tree_to_tree_diff(self.repo, &old_tree, &new_tree)?
-            }
-        };
-        let stats = collect_diff_stats(
+        let diff = resolved.load(self.repo)?;
+        let stats = walk_diff(
             &diff,
             self.workdir.as_deref(),
-            matches!(target, DiffTarget::Worktree),
+            resolved.allows_worktree_fallback(),
+            DiffStatsCollector::default(),
         );
-        self.cache.insert(key, stats.clone());
+        self.cache.insert(resolved, stats.clone());
         Ok(stats)
     }
 }
@@ -305,123 +348,191 @@ impl DiffFile {
     }
 }
 
-fn load_git_diff<'repo>(
-    repo: &'repo Repository,
-    target: &DiffTarget,
-) -> Result<GitDiff<'repo>, git2::Error> {
-    match target {
-        DiffTarget::Worktree => {
-            let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
-            let mut opts = DiffOptions::new();
-            opts.include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .include_typechange(true)
-                .include_unmodified(false)
-                .ignore_submodules(true);
-            repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
-        }
-        DiffTarget::Cached => {
-            let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
-            let index = repo.index()?;
-            let mut opts = DiffOptions::new();
-            opts.include_typechange(true)
-                .include_unmodified(false)
-                .ignore_submodules(true);
-            repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))
-        }
-        DiffTarget::Range { base, head } => {
-            let base_tree = peel_revision_tree(repo, base)?;
-            let head_tree = peel_revision_tree(repo, head)?;
-            tree_to_tree_diff(repo, &base_tree, &head_tree)
-        }
-        DiffTarget::MergeBaseRange { base, head } => {
-            let merge_base = repo.merge_base(
-                revision_commit_id(repo, base)?,
-                revision_commit_id(repo, head)?,
-            )?;
-            let merge_base_commit = repo.find_commit(merge_base)?;
-            let merge_base_tree = merge_base_commit.tree()?;
-            let head_tree = peel_revision_tree(repo, head)?;
-            tree_to_tree_diff(repo, &merge_base_tree, &head_tree)
-        }
-    }
-}
-
-fn diff_stats_key(repo: &Repository, target: &DiffTarget) -> Result<DiffStatsKey, git2::Error> {
-    match target {
-        DiffTarget::Worktree => Ok(DiffStatsKey::Worktree),
-        DiffTarget::Cached => Ok(DiffStatsKey::Cached),
-        DiffTarget::Range { base, head } => Ok(DiffStatsKey::Trees {
-            old: peel_revision_tree(repo, base)?.id(),
-            new: peel_revision_tree(repo, head)?.id(),
-        }),
-        DiffTarget::MergeBaseRange { base, head } => {
-            let merge_base = repo.merge_base(
-                revision_commit_id(repo, base)?,
-                revision_commit_id(repo, head)?,
-            )?;
-            Ok(DiffStatsKey::Trees {
-                old: repo.find_commit(merge_base)?.tree_id(),
+impl ResolvedDiff {
+    fn resolve(repo: &Repository, target: &DiffTarget) -> Result<Self, git2::Error> {
+        match target {
+            DiffTarget::Worktree => Ok(Self::Worktree {
+                head: head_tree_id(repo),
+            }),
+            DiffTarget::Cached => Ok(Self::Cached {
+                head: head_tree_id(repo),
+            }),
+            DiffTarget::Range { base, head } => Ok(Self::Trees {
+                old: peel_revision_tree(repo, base)?.id(),
                 new: peel_revision_tree(repo, head)?.id(),
-            })
+            }),
+            DiffTarget::MergeBaseRange { base, head } => {
+                let merge_base = repo.merge_base(
+                    revision_commit_id(repo, base)?,
+                    revision_commit_id(repo, head)?,
+                )?;
+                Ok(Self::Trees {
+                    old: repo.find_commit(merge_base)?.tree_id(),
+                    new: peel_revision_tree(repo, head)?.id(),
+                })
+            }
         }
+    }
+
+    fn load<'repo>(&self, repo: &'repo Repository) -> Result<GitDiff<'repo>, git2::Error> {
+        match *self {
+            Self::Worktree { head } => {
+                let head_tree = head.map(|id| repo.find_tree(id)).transpose()?;
+                let mut opts = DiffOptions::new();
+                opts.include_untracked(true)
+                    .recurse_untracked_dirs(true)
+                    .include_typechange(true)
+                    .include_unmodified(false)
+                    .ignore_submodules(true);
+                repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
+            }
+            Self::Cached { head } => {
+                let head_tree = head.map(|id| repo.find_tree(id)).transpose()?;
+                let index = repo.index()?;
+                let mut opts = DiffOptions::new();
+                opts.include_typechange(true)
+                    .include_unmodified(false)
+                    .ignore_submodules(true);
+                repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))
+            }
+            Self::Trees { old, new } => {
+                let old_tree = repo.find_tree(old)?;
+                let new_tree = repo.find_tree(new)?;
+                tree_to_tree_diff(repo, &old_tree, &new_tree)
+            }
+        }
+    }
+
+    fn allows_worktree_fallback(self) -> bool {
+        matches!(self, Self::Worktree { .. })
     }
 }
 
-fn collect_diff_stats(
+fn head_tree_id(repo: &Repository) -> Option<Oid> {
+    repo.head()
+        .ok()
+        .and_then(|head| head.peel_to_tree().ok())
+        .map(|tree| tree.id())
+}
+
+fn walk_diff<C: DiffCollector>(
     diff: &GitDiff<'_>,
     workdir: Option<&Path>,
     allow_worktree_fallback: bool,
-) -> DiffStatsBreakdown {
-    let mut stats = DiffStatsBreakdown::default();
-
+    mut collector: C,
+) -> C::Output {
     for (index, delta) in diff.deltas().enumerate() {
+        if !collector.includes(delta.status()) {
+            continue;
+        }
+
         let Some(patch) = Patch::from_diff(diff, index).ok().flatten() else {
             continue;
         };
 
-        // Read counts from libgit2 without copying hunks and lines into a DiffSession.
-        let (_, mut additions, deletions) = patch.line_stats().unwrap_or_default();
-        if allow_worktree_fallback
-            && patch.num_hunks() == 0
-            && let Some(lines) = synthetic_added_file_line_count(workdir, &delta)
-        {
-            additions = lines;
+        collector.begin_file(&delta);
+        let mut saw_hunk = false;
+
+        for hunk_index in 0..patch.num_hunks() {
+            let Ok((hunk, line_count)) = patch.hunk(hunk_index) else {
+                continue;
+            };
+            saw_hunk = true;
+            collector.begin_hunk(hunk.header());
+
+            for line_index in 0..line_count {
+                let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else {
+                    continue;
+                };
+
+                let walked_line = match line.origin() {
+                    ' ' => WalkedDiffLine::Context {
+                        old_lineno: line.old_lineno().unwrap_or(0) as usize,
+                        new_lineno: line.new_lineno().unwrap_or(0) as usize,
+                        text: line.content(),
+                    },
+                    '+' => WalkedDiffLine::Added {
+                        new_lineno: line.new_lineno().unwrap_or(0) as usize,
+                        text: line.content(),
+                    },
+                    '-' => WalkedDiffLine::Removed {
+                        old_lineno: line.old_lineno().unwrap_or(0) as usize,
+                        text: line.content(),
+                    },
+                    _ => continue,
+                };
+                collector.line(walked_line);
+            }
         }
 
-        let summary = DiffStats {
-            files: 1,
-            additions,
-            deletions,
-        };
-        stats.all.add(summary);
-        stats
-            .by_status
-            .entry(delta_filter_letter(delta.status()))
-            .or_default()
-            .add(summary);
+        if allow_worktree_fallback && !saw_hunk {
+            walk_synthetic_added_file(workdir, &delta, &mut collector);
+        }
+
+        collector.finish_file();
     }
 
-    stats
+    collector.finish()
 }
 
-fn collect_diff_files(
-    diff: &GitDiff<'_>,
+fn walk_synthetic_added_file<C: DiffCollector>(
     workdir: Option<&Path>,
-    allow_worktree_fallback: bool,
-    diff_filter: Option<&DiffFilter>,
-) -> Vec<DiffFile> {
-    let mut files = Vec::new();
+    delta: &git2::DiffDelta<'_>,
+    collector: &mut C,
+) {
+    if !matches!(delta.status(), Delta::Added | Delta::Untracked) {
+        return;
+    }
 
-    for (index, delta) in diff.deltas().enumerate() {
-        if diff_filter.is_some_and(|filter| !filter.matches(delta.status())) {
-            continue;
+    let Some(absolute_path) = workdir
+        .zip(delta.new_file().path())
+        .map(|(workdir, path)| workdir.join(path))
+    else {
+        return;
+    };
+    let Ok(file) = File::open(absolute_path) else {
+        return;
+    };
+
+    collector.begin_synthetic_hunk();
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut new_lineno = 0;
+
+    loop {
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                collector.finish_synthetic_hunk();
+                return;
+            }
+            Ok(_) => {
+                new_lineno += 1;
+                let text = line
+                    .strip_suffix('\n')
+                    .map(|text| text.strip_suffix('\r').unwrap_or(text))
+                    .unwrap_or(&line);
+                collector.line(WalkedDiffLine::Added {
+                    new_lineno,
+                    text: text.as_bytes(),
+                });
+                line.clear();
+            }
+            Err(_) => {
+                collector.discard_synthetic_hunk();
+                return;
+            }
         }
+    }
+}
 
-        let Some(patch) = Patch::from_diff(diff, index).ok().flatten() else {
-            continue;
-        };
+impl DiffCollector for DiffSessionCollector<'_> {
+    type Output = Vec<DiffFile>;
 
+    fn includes(&self, status: Delta) -> bool {
+        self.diff_filter.is_none_or(|filter| filter.matches(status))
+    }
+
+    fn begin_file(&mut self, delta: &git2::DiffDelta<'_>) {
         let old_path = delta
             .old_file()
             .path()
@@ -438,63 +549,158 @@ fn collect_diff_files(
             old_path.clone()
         };
 
-        let mut hunks = Vec::new();
-        let hunk_count = patch.num_hunks();
-
-        for hunk_index in 0..hunk_count {
-            let Ok((hunk, line_count)) = patch.hunk(hunk_index) else {
-                continue;
-            };
-            let header = String::from_utf8_lossy(hunk.header())
-                .trim_end()
-                .to_string();
-            let mut lines = Vec::new();
-
-            for line_index in 0..line_count {
-                let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else {
-                    continue;
-                };
-                let text = String::from_utf8_lossy(line.content())
-                    .trim_end_matches('\n')
-                    .to_string();
-
-                match line.origin() {
-                    ' ' => lines.push(DiffLine::Context {
-                        old_lineno: line.old_lineno().unwrap_or(0) as usize,
-                        new_lineno: line.new_lineno().unwrap_or(0) as usize,
-                        text,
-                    }),
-                    '+' => lines.push(DiffLine::Added {
-                        new_lineno: line.new_lineno().unwrap_or(0) as usize,
-                        text,
-                    }),
-                    '-' => lines.push(DiffLine::Removed {
-                        old_lineno: line.old_lineno().unwrap_or(0) as usize,
-                        text,
-                    }),
-                    _ => {}
-                }
-            }
-
-            hunks.push(DiffHunk { header, lines });
-        }
-
-        if allow_worktree_fallback
-            && hunks.is_empty()
-            && let Some(hunk) = synthetic_added_file_hunk(workdir, &delta, &new_path)
-        {
-            hunks.push(hunk);
-        }
-
-        files.push(DiffFile {
+        self.files.push(DiffFile {
             path,
             old_path,
             new_path,
-            hunks,
+            hunks: Vec::new(),
         });
     }
 
-    files
+    fn begin_hunk(&mut self, header: &[u8]) {
+        let header = String::from_utf8_lossy(header).trim_end().to_string();
+        self.files
+            .last_mut()
+            .expect("diff file must exist before its hunks")
+            .hunks
+            .push(DiffHunk {
+                header,
+                lines: Vec::new(),
+            });
+    }
+
+    fn line(&mut self, line: WalkedDiffLine<'_>) {
+        let line = match line {
+            WalkedDiffLine::Context {
+                old_lineno,
+                new_lineno,
+                text,
+            } => DiffLine::Context {
+                old_lineno,
+                new_lineno,
+                text: diff_line_text(text),
+            },
+            WalkedDiffLine::Added { new_lineno, text } => DiffLine::Added {
+                new_lineno,
+                text: diff_line_text(text),
+            },
+            WalkedDiffLine::Removed { old_lineno, text } => DiffLine::Removed {
+                old_lineno,
+                text: diff_line_text(text),
+            },
+        };
+        self.files
+            .last_mut()
+            .and_then(|file| file.hunks.last_mut())
+            .expect("diff hunk must exist before its lines")
+            .lines
+            .push(line);
+    }
+
+    fn begin_synthetic_hunk(&mut self) {
+        self.files
+            .last_mut()
+            .expect("diff file must exist before its hunks")
+            .hunks
+            .push(DiffHunk {
+                header: String::new(),
+                lines: Vec::new(),
+            });
+    }
+
+    fn finish_synthetic_hunk(&mut self) {
+        let file = self
+            .files
+            .last_mut()
+            .expect("diff file must exist before its hunks");
+        let Some(hunk) = file.hunks.last_mut() else {
+            return;
+        };
+        if hunk.lines.is_empty() {
+            file.hunks.pop();
+        } else {
+            hunk.header = format!("@@ -0,0 +1,{} @@", hunk.lines.len());
+        }
+    }
+
+    fn discard_synthetic_hunk(&mut self) {
+        self.files
+            .last_mut()
+            .expect("diff file must exist before its hunks")
+            .hunks
+            .pop();
+    }
+
+    fn finish_file(&mut self) {}
+
+    fn finish(self) -> Self::Output {
+        self.files
+    }
+}
+
+impl DiffCollector for DiffStatsCollector {
+    type Output = DiffStatsBreakdown;
+
+    fn includes(&self, _status: Delta) -> bool {
+        true
+    }
+
+    fn begin_file(&mut self, delta: &git2::DiffDelta<'_>) {
+        self.current = Some((
+            delta_filter_letter(delta.status()),
+            DiffStats {
+                files: 1,
+                ..DiffStats::default()
+            },
+        ));
+    }
+
+    fn begin_hunk(&mut self, _header: &[u8]) {}
+
+    fn line(&mut self, line: WalkedDiffLine<'_>) {
+        let Some((_, stats)) = self.current.as_mut() else {
+            return;
+        };
+        match line {
+            WalkedDiffLine::Added { .. } => stats.additions += 1,
+            WalkedDiffLine::Removed { .. } => stats.deletions += 1,
+            WalkedDiffLine::Context { .. } => {}
+        }
+    }
+
+    fn begin_synthetic_hunk(&mut self) {
+        self.synthetic_additions_start = self.current.map(|(_, stats)| stats.additions);
+    }
+
+    fn finish_synthetic_hunk(&mut self) {
+        self.synthetic_additions_start = None;
+    }
+
+    fn discard_synthetic_hunk(&mut self) {
+        if let (Some(start), Some((_, stats))) =
+            (self.synthetic_additions_start.take(), self.current.as_mut())
+        {
+            stats.additions = start;
+        }
+    }
+
+    fn finish_file(&mut self) {
+        let Some((status, stats)) = self.current.take() else {
+            return;
+        };
+        self.stats.all.add(stats);
+        self.stats.by_status.entry(status).or_default().add(stats);
+    }
+
+    fn finish(self) -> Self::Output {
+        self.stats
+    }
+}
+
+fn diff_line_text(text: &[u8]) -> String {
+    String::from_utf8_lossy(text)
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 fn tree_to_tree_diff<'repo>(
@@ -545,74 +751,16 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn synthetic_added_file_hunk(
-    workdir: Option<&Path>,
-    delta: &git2::DiffDelta<'_>,
-    new_path: &str,
-) -> Option<DiffHunk> {
-    if !matches!(delta.status(), Delta::Added | Delta::Untracked) {
-        return None;
-    }
-
-    let absolute_path = workdir?.join(new_path);
-    let contents = fs::read_to_string(absolute_path).ok()?;
-    let mut lines = Vec::new();
-
-    for (index, line) in contents.lines().enumerate() {
-        lines.push(DiffLine::Added {
-            new_lineno: index + 1,
-            text: line.to_string(),
-        });
-    }
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    Some(DiffHunk {
-        header: format!("@@ -0,0 +1,{} @@", lines.len()),
-        lines,
-    })
-}
-
-fn synthetic_added_file_line_count(
-    workdir: Option<&Path>,
-    delta: &git2::DiffDelta<'_>,
-) -> Option<usize> {
-    if !matches!(delta.status(), Delta::Added | Delta::Untracked) {
-        return None;
-    }
-
-    let absolute_path = workdir?.join(delta.new_file().path()?);
-    // Read one line at a time instead of keeping the whole untracked file.
-    count_utf8_lines(BufReader::new(File::open(absolute_path).ok()?)).ok()
-}
-
-fn count_utf8_lines(mut reader: impl BufRead) -> io::Result<usize> {
-    let mut count = 0;
-    let mut line = String::new();
-
-    loop {
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
-            return Ok(count);
-        }
-        count += 1;
-        line.clear();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
-        io::Cursor,
         path::{Path, PathBuf},
         process,
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use git2::{IndexAddOption, Repository, Signature};
+    use git2::{IndexAddOption, Repository, Signature, build::CheckoutBuilder};
 
     use super::*;
 
@@ -632,6 +780,7 @@ mod tests {
             let repo = Repository::init(&path).expect("initialize test repository");
             fs::write(path.join("modified.txt"), "before\n").expect("write modified fixture");
             fs::write(path.join("deleted.txt"), "deleted\n").expect("write deleted fixture");
+            fs::write(path.join("binary.bin"), [0, 1, 0, 2]).expect("write binary fixture");
             commit_all(&repo, "initial");
             drop(repo);
 
@@ -656,6 +805,9 @@ mod tests {
     fn commit_all(repo: &Repository, message: &str) -> Oid {
         let mut index = repo.index().expect("open index");
         index
+            .update_all(["*"], None)
+            .expect("update tracked fixture files");
+        index
             .add_all(["*"], IndexAddOption::DEFAULT, None)
             .expect("add fixture files");
         index.write().expect("write index");
@@ -663,17 +815,26 @@ mod tests {
         let tree_id = index.write_tree().expect("write tree");
         let tree = repo.find_tree(tree_id).expect("find tree");
         let signature = Signature::now("Enza tests", "enza@example.com").expect("signature");
+        let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+        let parents = parent.iter().collect::<Vec<_>>();
+        let update_ref = if parent.is_some() {
+            "HEAD"
+        } else {
+            "refs/heads/main"
+        };
         let commit_id = repo
             .commit(
-                Some("refs/heads/main"),
+                Some(update_ref),
                 &signature,
                 &signature,
                 message,
                 &tree,
-                &[],
+                &parents,
             )
-            .expect("create initial commit");
-        repo.set_head("refs/heads/main").expect("set HEAD");
+            .expect("create commit");
+        if parent.is_none() {
+            repo.set_head("refs/heads/main").expect("set HEAD");
+        }
         commit_id
     }
 
@@ -688,6 +849,30 @@ mod tests {
             summary.deletions += deletions;
         }
         summary
+    }
+
+    fn assert_target_stats_match(fixture: &TestRepo, target: &DiffTarget) -> DiffStatsBreakdown {
+        let repo = fixture.open();
+        let mut loader = DiffStatsLoader::new(&repo);
+        let stats = loader.load(target).expect("load diff stats");
+
+        let full_session =
+            DiffSession::load_from_repo(fixture.path(), target, None).expect("load full diff");
+        assert_eq!(stats.stats(None), stats_for_session(&full_session));
+
+        for value in ["M", "A", "D", "AD", "m", "a", "d"] {
+            let filter = DiffFilter::parse(value).expect("parse test filter");
+            let filtered_session =
+                DiffSession::load_from_repo(fixture.path(), target, Some(&filter))
+                    .expect("load filtered diff");
+            assert_eq!(
+                stats.stats(Some(&filter)),
+                stats_for_session(&filtered_session),
+                "stats differ for --diff-filter={value}"
+            );
+        }
+
+        stats
     }
 
     #[test]
@@ -709,15 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn stats_line_count_matches_diff_line_splitting() {
-        assert_eq!(count_utf8_lines(Cursor::new(b"")).unwrap(), 0);
-        assert_eq!(count_utf8_lines(Cursor::new(b"one")).unwrap(), 1);
-        assert_eq!(count_utf8_lines(Cursor::new(b"one\n")).unwrap(), 1);
-        assert_eq!(count_utf8_lines(Cursor::new(b"one\n\n")).unwrap(), 2);
-        assert!(count_utf8_lines(Cursor::new(vec![0xff, b'\n'])).is_err());
-    }
-
-    #[test]
     fn worktree_stats_match_full_diff_session() {
         let fixture = TestRepo::new();
         fs::write(fixture.path().join("modified.txt"), "before\nafter\n").expect("modify fixture");
@@ -725,25 +901,7 @@ mod tests {
         fs::write(fixture.path().join("untracked.txt"), "first\nsecond\n")
             .expect("write untracked fixture");
 
-        let repo = fixture.open();
-        let mut loader = DiffStatsLoader::new(&repo);
-        let stats = loader
-            .load(&DiffTarget::Worktree)
-            .expect("load worktree stats");
-
-        let full_session = DiffSession::load_from_repo(fixture.path(), &DiffTarget::Worktree, None)
-            .expect("load full worktree diff");
-        assert_eq!(stats.stats(None), stats_for_session(&full_session));
-
-        for filter in ["M", "A", "D"].map(|value| DiffFilter::parse(value).unwrap()) {
-            let filtered_session =
-                DiffSession::load_from_repo(fixture.path(), &DiffTarget::Worktree, Some(&filter))
-                    .expect("load filtered worktree diff");
-            assert_eq!(
-                stats.stats(Some(&filter)),
-                stats_for_session(&filtered_session)
-            );
-        }
+        let stats = assert_target_stats_match(&fixture, &DiffTarget::Worktree);
 
         assert_eq!(
             stats.stats(None),
@@ -753,6 +911,174 @@ mod tests {
                 deletions: 1,
             }
         );
+    }
+
+    #[test]
+    fn cached_stats_match_full_diff_session() {
+        let fixture = TestRepo::new();
+        fs::write(fixture.path().join("modified.txt"), "before\nstaged\n")
+            .expect("modify staged fixture");
+        fs::write(fixture.path().join("staged-empty.txt"), "").expect("write empty staged fixture");
+
+        let repo = fixture.open();
+        let mut index = repo.index().expect("open index");
+        index
+            .add_path(Path::new("modified.txt"))
+            .expect("stage modified fixture");
+        index
+            .add_path(Path::new("staged-empty.txt"))
+            .expect("stage empty fixture");
+        index.write().expect("write staged fixtures");
+        drop(index);
+        drop(repo);
+
+        let stats = assert_target_stats_match(&fixture, &DiffTarget::Cached);
+        assert_eq!(
+            stats.stats(None),
+            DiffStats {
+                files: 2,
+                additions: 1,
+                deletions: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn range_stats_match_full_diff_session() {
+        let fixture = TestRepo::new();
+        fs::write(fixture.path().join("modified.txt"), "after\n").expect("modify range fixture");
+        fs::write(fixture.path().join("range-added.txt"), "first\nsecond\n")
+            .expect("add range fixture");
+
+        let repo = fixture.open();
+        commit_all(&repo, "second");
+        drop(repo);
+
+        let target = DiffTarget::Range {
+            base: "main~1".to_string(),
+            head: "main".to_string(),
+        };
+        let stats = assert_target_stats_match(&fixture, &target);
+        assert_eq!(
+            stats.stats(None),
+            DiffStats {
+                files: 2,
+                additions: 3,
+                deletions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn merge_base_stats_match_full_diff_session() {
+        let fixture = TestRepo::new();
+        let repo = fixture.open();
+        let initial = repo
+            .head()
+            .expect("read initial HEAD")
+            .peel_to_commit()
+            .expect("find initial commit");
+        repo.branch("feature", &initial, false)
+            .expect("create feature branch");
+
+        fs::write(fixture.path().join("modified.txt"), "main\n").expect("modify main fixture");
+        commit_all(&repo, "main change");
+
+        repo.set_head("refs/heads/feature")
+            .expect("switch HEAD to feature");
+        repo.checkout_head(Some(CheckoutBuilder::new().force()))
+            .expect("check out feature");
+        fs::write(fixture.path().join("modified.txt"), "feature\none\n")
+            .expect("modify feature fixture");
+        fs::write(fixture.path().join("feature-added.txt"), "feature\n")
+            .expect("add feature fixture");
+        commit_all(&repo, "feature change");
+        drop(initial);
+        drop(repo);
+
+        let target = DiffTarget::MergeBaseRange {
+            base: "main".to_string(),
+            head: "feature".to_string(),
+        };
+        let stats = assert_target_stats_match(&fixture, &target);
+        assert_eq!(
+            stats.stats(None),
+            DiffStats {
+                files: 2,
+                additions: 3,
+                deletions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn binary_empty_and_invalid_utf8_worktree_files_share_canonical_behavior() {
+        let fixture = TestRepo::new();
+        fs::write(fixture.path().join("binary.bin"), [0, 1, 0, 3]).expect("modify binary fixture");
+        fs::write(fixture.path().join("empty.txt"), "").expect("write empty fixture");
+        fs::write(
+            fixture.path().join("invalid.txt"),
+            [b'v', b'a', b'l', b'i', b'd', b'\n', b'f', 0xff, b'\n'],
+        )
+        .expect("write invalid UTF-8 fixture");
+
+        let stats = assert_target_stats_match(&fixture, &DiffTarget::Worktree);
+        assert_eq!(
+            stats.stats(None),
+            DiffStats {
+                files: 3,
+                additions: 0,
+                deletions: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn untracked_fallback_preserves_line_content() {
+        let fixture = TestRepo::new();
+        fs::write(fixture.path().join("line-endings.txt"), "first\r\nsecond\r")
+            .expect("write line-ending fixture");
+
+        let session = DiffSession::load_from_repo(fixture.path(), &DiffTarget::Worktree, None)
+            .expect("load untracked fallback");
+        let texts = session.files[0].hunks[0]
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                DiffLine::Added { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["first", "second\r"]);
+
+        let stats = assert_target_stats_match(&fixture, &DiffTarget::Worktree);
+        assert_eq!(
+            stats.stats(None),
+            DiffStats {
+                files: 1,
+                additions: 2,
+                deletions: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_revision_errors_match() {
+        let fixture = TestRepo::new();
+        let target = DiffTarget::Range {
+            base: "missing-revision".to_string(),
+            head: "HEAD".to_string(),
+        };
+
+        let session_error = DiffSession::load_from_repo(fixture.path(), &target, None)
+            .expect_err("full diff should reject an invalid revision");
+        let repo = fixture.open();
+        let stats_error = DiffStatsLoader::new(&repo)
+            .load(&target)
+            .expect_err("stats should reject an invalid revision");
+
+        assert_eq!(stats_error.code(), session_error.code());
+        assert_eq!(stats_error.class(), session_error.class());
     }
 
     #[test]
@@ -783,6 +1109,15 @@ mod tests {
         loader
             .load(&main_to_head)
             .expect("reuse equivalent tree summary");
+        assert_eq!(loader.cache.len(), 2);
+
+        let main_merge_base_to_head = DiffTarget::MergeBaseRange {
+            base: "main".to_string(),
+            head: "HEAD".to_string(),
+        };
+        loader
+            .load(&main_merge_base_to_head)
+            .expect("reuse range summary for equivalent merge-base trees");
         assert_eq!(loader.cache.len(), 2);
     }
 }
