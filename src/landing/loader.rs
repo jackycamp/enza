@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     path::Path,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
     },
@@ -11,7 +11,10 @@ use std::{
 
 use git2::{BranchType, Repository};
 
-use crate::diff::{DiffFilter, DiffStats, DiffStatsBreakdown, DiffStatsLoader, DiffTarget};
+use crate::{
+    diff::{DiffFilter, DiffSession, DiffStats, DiffStatsBreakdown, DiffStatsLoader, DiffTarget},
+    log,
+};
 
 pub(super) struct LandingData {
     pub(super) suggestions: Vec<LandingSuggestion>,
@@ -19,7 +22,20 @@ pub(super) struct LandingData {
 }
 
 pub(super) struct LandingWorker {
-    result_rx: Receiver<LandingData>,
+    worker: BackgroundWorker<LandingData>,
+}
+
+pub(crate) struct LoadedDiff {
+    pub(crate) session: DiffSession,
+    pub(crate) target: DiffTarget,
+}
+
+pub(super) struct DiffLoadWorker {
+    worker: BackgroundWorker<LoadedDiff>,
+}
+
+struct BackgroundWorker<T> {
+    result_rx: Receiver<T>,
     cancelled: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -50,6 +66,50 @@ impl LandingWorker {
     where
         F: FnOnce(&AtomicBool) -> Option<LandingData> + Send + 'static,
     {
+        Self {
+            worker: BackgroundWorker::spawn(load),
+        }
+    }
+
+    pub(super) fn take_result(&self) -> Option<LandingData> {
+        self.worker.take_result()
+    }
+
+    pub(super) fn load_diff(
+        mut self,
+        repo_path: &Path,
+        target: DiffTarget,
+        diff_filter: Option<DiffFilter>,
+    ) -> DiffLoadWorker {
+        let previous = self.worker.cancel_and_take_handle();
+        let repo_path = repo_path.to_path_buf();
+
+        DiffLoadWorker {
+            worker: BackgroundWorker::spawn(move |cancelled| {
+                if let Some(handle) = previous {
+                    let _ = handle.join();
+                }
+                if cancelled.load(Ordering::Relaxed) {
+                    return None;
+                }
+
+                load_full_diff(&repo_path, target, diff_filter.as_ref(), cancelled)
+            }),
+        }
+    }
+}
+
+impl DiffLoadWorker {
+    pub(super) fn take_result(&self) -> Option<LoadedDiff> {
+        self.worker.take_result()
+    }
+}
+
+impl<T: Send + 'static> BackgroundWorker<T> {
+    fn spawn<F>(load: F) -> Self
+    where
+        F: FnOnce(&AtomicBool) -> Option<T> + Send + 'static,
+    {
         let (result_tx, result_rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
@@ -70,21 +130,73 @@ impl LandingWorker {
         }
     }
 
-    pub(super) fn take_result(&self) -> Option<LandingData> {
+    fn take_result(&self) -> Option<T> {
         self.result_rx.try_recv().ok()
     }
 
-    pub(super) fn cancel_and_join(&mut self) {
+    fn cancel_and_take_handle(&mut self) -> Option<thread::JoinHandle<()>> {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.handle.take()
+    }
+}
+
+impl<T> Drop for BackgroundWorker<T> {
+    fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            reap_in_background(handle);
         }
     }
 }
 
-impl Drop for LandingWorker {
-    fn drop(&mut self) {
-        self.cancel_and_join();
+fn load_full_diff(
+    repo_path: &Path,
+    target: DiffTarget,
+    diff_filter: Option<&DiffFilter>,
+    cancelled: &AtomicBool,
+) -> Option<LoadedDiff> {
+    let mut diff_load = log::timer("diff_load");
+    let session =
+        match DiffSession::load_from_repo_cancellable(repo_path, &target, diff_filter, || {
+            cancelled.load(Ordering::Relaxed)
+        }) {
+            Ok(Some(session)) => session,
+            Ok(None) => return None,
+            Err(_) => DiffSession::default(),
+        };
+
+    diff_load.field("files", session.num_files());
+    diff_load.field("hunks", session.num_hunks());
+    diff_load.field("lines", session.num_lines());
+
+    if cancelled.load(Ordering::Relaxed) {
+        None
+    } else {
+        Some(LoadedDiff { session, target })
+    }
+}
+
+fn reap_in_background(handle: thread::JoinHandle<()>) {
+    static REAPER: OnceLock<mpsc::Sender<thread::JoinHandle<()>>> = OnceLock::new();
+
+    let reaper = REAPER.get_or_init(|| {
+        let (handle_tx, handle_rx) = mpsc::channel::<thread::JoinHandle<()>>();
+        let _ = thread::Builder::new()
+            .name("enza-worker-reaper".to_string())
+            .spawn(move || {
+                while let Ok(handle) = handle_rx.recv() {
+                    let _ = handle.join();
+                }
+            });
+        handle_tx
+    });
+
+    if let Err(mpsc::SendError(handle)) = reaper.send(handle) {
+        let _ = thread::Builder::new()
+            .name("enza-worker-cleanup".to_string())
+            .spawn(move || {
+                let _ = handle.join();
+            });
     }
 }
 
@@ -99,7 +211,7 @@ fn load_landing_data(repo_path: &Path, cancelled: &AtomicBool) -> Option<Landing
             worktree_stats,
         });
     };
-    // Load the worktree once. The M, A and D suggestions reuse these counts.
+    // The loader scans the worktree one time. The `M`, `A`, and `D` suggestions reuse these counts.
     let mut stats_loader = DiffStatsLoader::new(&repo);
     let worktree_stats_breakdown =
         match stats_loader.load(&DiffTarget::Worktree, || cancelled.load(Ordering::Relaxed)) {
@@ -381,7 +493,7 @@ mod tests {
         time::Duration,
     };
 
-    use super::{LandingData, LandingSuggestion, LandingWorker};
+    use super::{BackgroundWorker, LandingData, LandingSuggestion, LandingWorker};
     use crate::diff::{DiffStats, DiffTarget};
 
     #[test]
@@ -394,6 +506,7 @@ mod tests {
         });
 
         let data = worker
+            .worker
             .result_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
@@ -403,22 +516,63 @@ mod tests {
     }
 
     #[test]
-    fn dropping_landing_worker_cancels_and_joins_its_thread() {
+    fn dropping_landing_worker_cancels_without_waiting_for_its_thread() {
         let (started_tx, started_rx) = mpsc::channel();
         let (stopped_tx, stopped_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
         let worker = LandingWorker::spawn(move |cancelled| {
             started_tx.send(()).unwrap();
             while !cancelled.load(Ordering::Relaxed) {
                 thread::yield_now();
             }
+            let _ = release_rx.recv();
             stopped_tx.send(()).unwrap();
             None
         });
 
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        drop(worker);
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        thread::spawn(move || {
+            drop(worker);
+            dropped_tx.send(()).unwrap();
+        });
 
+        let dropped_without_waiting = dropped_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        assert!(stopped_rx.try_recv().is_err());
+        release_tx.send(()).unwrap();
         stopped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(dropped_without_waiting);
+    }
+
+    #[test]
+    fn replacement_work_starts_after_the_cancelled_worker_stops() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut previous = BackgroundWorker::spawn(move |cancelled| {
+            started_tx.send(()).unwrap();
+            while !cancelled.load(Ordering::Relaxed) {
+                thread::yield_now();
+            }
+            let _ = release_rx.recv();
+            None::<()>
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let previous_handle = previous.cancel_and_take_handle();
+        let (replacement_tx, replacement_rx) = mpsc::channel();
+        let replacement = BackgroundWorker::spawn(move |_| {
+            if let Some(handle) = previous_handle {
+                let _ = handle.join();
+            }
+            replacement_tx.send(()).unwrap();
+            Some(())
+        });
+
+        assert!(replacement_rx.try_recv().is_err());
+        release_tx.send(()).unwrap();
+        replacement_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        drop(replacement);
     }
 
     fn suggestion(command: &str, target: DiffTarget) -> LandingSuggestion {

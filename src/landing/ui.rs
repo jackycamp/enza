@@ -16,11 +16,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use super::{
-    LandingSelection,
-    loader::{LandingData, LandingSuggestion, LandingWorker, loading_worktree_suggestion},
+use super::loader::{
+    DiffLoadWorker, LandingData, LandingSuggestion, LandingWorker, LoadedDiff,
+    loading_worktree_suggestion,
 };
-use crate::diff::DiffStats;
+use crate::diff::{DiffFilter, DiffStats, DiffTarget};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const BASELINE_PARTICLE_COUNT: usize = 32;
@@ -40,10 +40,25 @@ struct LandingApp {
     particles: ParticleField,
 }
 
-enum LandingAction {
+struct LandingSelection {
+    target: DiffTarget,
+    diff_filter: Option<DiffFilter>,
+}
+
+enum LandingPhase {
+    Discovering(LandingWorker),
+    Opening(DiffLoadWorker),
+}
+
+enum DiscoveringAction {
     Continue,
     Quit,
     Open(LandingSelection),
+}
+
+enum OpeningAction {
+    Continue,
+    Quit,
 }
 
 struct ParticleField {
@@ -72,18 +87,27 @@ struct TinyRng {
 pub fn run_landing_page<B: Backend>(
     terminal: &mut Terminal<B>,
     repo_path: &Path,
-) -> io::Result<Option<LandingSelection>> {
+) -> io::Result<Option<LoadedDiff>> {
     let mut app = LandingApp::new();
     let mut last_tick = Instant::now();
 
     app.tick(0.0, terminal.get_frame().area());
     terminal.draw(|frame| render(frame, &app))?;
 
-    let mut worker = LandingWorker::new(repo_path);
+    let mut phase = LandingPhase::Discovering(LandingWorker::new(repo_path));
 
     loop {
-        if let Some(data) = worker.take_result() {
-            app.apply_data(data);
+        match &phase {
+            LandingPhase::Discovering(worker) => {
+                if let Some(data) = worker.take_result() {
+                    app.apply_data(data);
+                }
+            }
+            LandingPhase::Opening(worker) => {
+                if let Some(loaded) = worker.take_result() {
+                    return Ok(Some(loaded));
+                }
+            }
         }
 
         let now = Instant::now();
@@ -94,17 +118,27 @@ pub fn run_landing_page<B: Backend>(
         terminal.draw(|frame| render(frame, &app))?;
 
         if event::poll(FRAME_INTERVAL)? {
-            match handle_event(&mut app, event::read()?) {
-                LandingAction::Continue => {}
-                LandingAction::Quit => {
-                    worker.cancel_and_join();
-                    return Ok(None);
+            let event = event::read()?;
+            phase = match phase {
+                LandingPhase::Discovering(worker) => {
+                    match handle_discovering_event(&mut app, event) {
+                        DiscoveringAction::Continue => LandingPhase::Discovering(worker),
+                        DiscoveringAction::Quit => return Ok(None),
+                        DiscoveringAction::Open(selection) => {
+                            app.show_opening();
+                            LandingPhase::Opening(worker.load_diff(
+                                repo_path,
+                                selection.target,
+                                selection.diff_filter,
+                            ))
+                        }
+                    }
                 }
-                LandingAction::Open(selection) => {
-                    worker.cancel_and_join();
-                    return Ok(Some(selection));
-                }
-            }
+                LandingPhase::Opening(worker) => match handle_opening_event(event) {
+                    OpeningAction::Continue => LandingPhase::Opening(worker),
+                    OpeningAction::Quit => return Ok(None),
+                },
+            };
         }
     }
 }
@@ -165,9 +199,74 @@ impl LandingApp {
             })
     }
 
+    fn show_opening(&mut self) {
+        if let Some(suggestion) = self.suggestions.get_mut(self.selected) {
+            suggestion.detail = "Opening diff...".to_string();
+        }
+    }
+
     fn tick(&mut self, dt: f32, area: Rect) {
         self.particles.update(dt, area);
     }
+}
+
+fn handle_discovering_event(app: &mut LandingApp, event: Event) -> DiscoveringAction {
+    match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            handle_discovering_key_event(app, key)
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                app.next();
+                DiscoveringAction::Continue
+            }
+            MouseEventKind::ScrollUp => {
+                app.previous();
+                DiscoveringAction::Continue
+            }
+            _ => DiscoveringAction::Continue,
+        },
+        _ => DiscoveringAction::Continue,
+    }
+}
+
+fn handle_discovering_key_event(app: &mut LandingApp, key: KeyEvent) -> DiscoveringAction {
+    if is_quit_key(key) {
+        return DiscoveringAction::Quit;
+    }
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.next();
+            DiscoveringAction::Continue
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.previous();
+            DiscoveringAction::Continue
+        }
+        KeyCode::Enter => app
+            .select()
+            .map(DiscoveringAction::Open)
+            .unwrap_or(DiscoveringAction::Continue),
+        _ => DiscoveringAction::Continue,
+    }
+}
+
+fn handle_opening_event(event: Event) -> OpeningAction {
+    match event {
+        Event::Key(key)
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && is_quit_key(key) =>
+        {
+            OpeningAction::Quit
+        }
+        _ => OpeningAction::Continue,
+    }
+}
+
+fn is_quit_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        || key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 impl ParticleField {
@@ -350,48 +449,6 @@ fn particle_color(low: (u8, u8, u8), high: (u8, u8, u8), intensity: f32) -> Colo
     Color::Rgb(mix(low.0, high.0), mix(low.1, high.1), mix(low.2, high.2))
 }
 
-fn handle_event(app: &mut LandingApp, event: Event) -> LandingAction {
-    match event {
-        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            handle_key_event(app, key)
-        }
-        Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                app.next();
-                LandingAction::Continue
-            }
-            MouseEventKind::ScrollUp => {
-                app.previous();
-                LandingAction::Continue
-            }
-            _ => LandingAction::Continue,
-        },
-        _ => LandingAction::Continue,
-    }
-}
-
-fn handle_key_event(app: &mut LandingApp, key: KeyEvent) -> LandingAction {
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('q') | KeyCode::Esc, _) => LandingAction::Quit,
-        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            LandingAction::Quit
-        }
-        (KeyCode::Char('j') | KeyCode::Down, _) => {
-            app.next();
-            LandingAction::Continue
-        }
-        (KeyCode::Char('k') | KeyCode::Up, _) => {
-            app.previous();
-            LandingAction::Continue
-        }
-        (KeyCode::Enter, _) => app
-            .select()
-            .map(LandingAction::Open)
-            .unwrap_or(LandingAction::Continue),
-        _ => LandingAction::Continue,
-    }
-}
-
 fn render(frame: &mut Frame<'_>, app: &LandingApp) {
     let area = frame.area();
     frame.render_widget(
@@ -568,11 +625,12 @@ fn centered_width(area: Rect, width: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::{
         BASELINE_PARTICLE_COUNT, LandingApp, LandingData, LandingSuggestion, MAX_PARTICLE_COUNT,
-        particle_count, render,
+        OpeningAction, handle_opening_event, particle_count, render,
     };
     use crate::diff::{DiffStats, DiffTarget};
 
@@ -625,6 +683,18 @@ mod tests {
         assert_eq!(app.selected, 1);
         assert_eq!(app.select().unwrap().target, DiffTarget::Worktree);
         assert_eq!(app.particles.particles.len(), BASELINE_PARTICLE_COUNT + 4);
+    }
+
+    #[test]
+    fn opening_phase_ignores_selection_input_but_accepts_quit() {
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            handle_opening_event(enter),
+            OpeningAction::Continue
+        ));
+
+        let quit = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(handle_opening_event(quit), OpeningAction::Quit));
     }
 
     #[test]
