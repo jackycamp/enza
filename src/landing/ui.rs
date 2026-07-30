@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     io,
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -8,7 +7,6 @@ use std::{
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
-use git2::{BranchType, Repository};
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
@@ -18,7 +16,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::diff::{DiffFilter, DiffSession, DiffTarget};
+use super::loader::{
+    DiffLoadWorker, LandingData, LandingSuggestion, LandingWorker, LoadedDiff,
+    loading_worktree_suggestion,
+};
+use crate::diff::{DiffFilter, DiffStats, DiffTarget};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const BASELINE_PARTICLE_COUNT: usize = 32;
@@ -32,38 +34,31 @@ const LOGO: &[&str] = &[
     "  \\/_____/   \\/_/ \\/_/   \\/_____/   \\/_/\\/_/",
 ];
 
-pub struct LandingSelection {
-    pub target: DiffTarget,
-    pub diff_filter: Option<DiffFilter>,
-}
-
 struct LandingApp {
     suggestions: Vec<LandingSuggestion>,
     selected: usize,
     particles: ParticleField,
 }
 
-enum LandingAction {
+struct LandingSelection {
+    target: DiffTarget,
+    diff_filter: Option<DiffFilter>,
+}
+
+enum LandingPhase {
+    Discovering(LandingWorker),
+    Opening(DiffLoadWorker),
+}
+
+enum DiscoveringAction {
     Continue,
     Quit,
     Open(LandingSelection),
 }
 
-#[derive(Clone)]
-struct LandingSuggestion {
-    title: String,
-    command: String,
-    detail: String,
-    target: DiffTarget,
-    diff_filter: Option<DiffFilter>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct DiffStats {
-    files: usize,
-    hunks: usize,
-    additions: usize,
-    deletions: usize,
+enum OpeningAction {
+    Continue,
+    Quit,
 }
 
 struct ParticleField {
@@ -92,11 +87,29 @@ struct TinyRng {
 pub fn run_landing_page<B: Backend>(
     terminal: &mut Terminal<B>,
     repo_path: &Path,
-) -> io::Result<Option<LandingSelection>> {
-    let mut app = LandingApp::new(repo_path);
+) -> io::Result<Option<LoadedDiff>> {
+    let mut app = LandingApp::new();
     let mut last_tick = Instant::now();
 
+    app.tick(0.0, terminal.get_frame().area());
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let mut phase = LandingPhase::Discovering(LandingWorker::new(repo_path));
+
     loop {
+        match &phase {
+            LandingPhase::Discovering(worker) => {
+                if let Some(data) = worker.take_result() {
+                    app.apply_data(data);
+                }
+            }
+            LandingPhase::Opening(worker) => {
+                if let Some(loaded) = worker.take_result() {
+                    return Ok(Some(loaded));
+                }
+            }
+        }
+
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f32().min(0.25);
         last_tick = now;
@@ -105,23 +118,56 @@ pub fn run_landing_page<B: Backend>(
         terminal.draw(|frame| render(frame, &app))?;
 
         if event::poll(FRAME_INTERVAL)? {
-            match handle_event(&mut app, event::read()?) {
-                LandingAction::Continue => {}
-                LandingAction::Quit => return Ok(None),
-                LandingAction::Open(selection) => return Ok(Some(selection)),
-            }
+            let event = event::read()?;
+            phase = match phase {
+                LandingPhase::Discovering(worker) => {
+                    match handle_discovering_event(&mut app, event) {
+                        DiscoveringAction::Continue => LandingPhase::Discovering(worker),
+                        DiscoveringAction::Quit => return Ok(None),
+                        DiscoveringAction::Open(selection) => {
+                            app.show_opening();
+                            LandingPhase::Opening(worker.load_diff(
+                                repo_path,
+                                selection.target,
+                                selection.diff_filter,
+                            ))
+                        }
+                    }
+                }
+                LandingPhase::Opening(worker) => match handle_opening_event(event) {
+                    OpeningAction::Continue => LandingPhase::Opening(worker),
+                    OpeningAction::Quit => return Ok(None),
+                },
+            };
         }
     }
 }
 
 impl LandingApp {
-    fn new(repo_path: &Path) -> Self {
-        let worktree_stats = load_stats(repo_path, &DiffTarget::Worktree, None).unwrap_or_default();
+    fn new() -> Self {
         Self {
-            suggestions: build_suggestions(repo_path, worktree_stats),
+            suggestions: vec![loading_worktree_suggestion()],
             selected: 0,
-            particles: ParticleField::new(worktree_stats),
+            particles: ParticleField::new(DiffStats::default()),
         }
+    }
+
+    fn apply_data(&mut self, data: LandingData) {
+        let selected_command = self
+            .suggestions
+            .get(self.selected)
+            .map(|suggestion| suggestion.command.as_str());
+        let selected = selected_command
+            .and_then(|command| {
+                data.suggestions
+                    .iter()
+                    .position(|suggestion| suggestion.command == command)
+            })
+            .unwrap_or(0);
+
+        self.suggestions = data.suggestions;
+        self.selected = selected.min(self.suggestions.len().saturating_sub(1));
+        self.particles = ParticleField::new(data.worktree_stats);
     }
 
     fn next(&mut self) {
@@ -153,9 +199,74 @@ impl LandingApp {
             })
     }
 
+    fn show_opening(&mut self) {
+        if let Some(suggestion) = self.suggestions.get_mut(self.selected) {
+            suggestion.detail = "Opening diff...".to_string();
+        }
+    }
+
     fn tick(&mut self, dt: f32, area: Rect) {
         self.particles.update(dt, area);
     }
+}
+
+fn handle_discovering_event(app: &mut LandingApp, event: Event) -> DiscoveringAction {
+    match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            handle_discovering_key_event(app, key)
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                app.next();
+                DiscoveringAction::Continue
+            }
+            MouseEventKind::ScrollUp => {
+                app.previous();
+                DiscoveringAction::Continue
+            }
+            _ => DiscoveringAction::Continue,
+        },
+        _ => DiscoveringAction::Continue,
+    }
+}
+
+fn handle_discovering_key_event(app: &mut LandingApp, key: KeyEvent) -> DiscoveringAction {
+    if is_quit_key(key) {
+        return DiscoveringAction::Quit;
+    }
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.next();
+            DiscoveringAction::Continue
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.previous();
+            DiscoveringAction::Continue
+        }
+        KeyCode::Enter => app
+            .select()
+            .map(DiscoveringAction::Open)
+            .unwrap_or(DiscoveringAction::Continue),
+        _ => DiscoveringAction::Continue,
+    }
+}
+
+fn handle_opening_event(event: Event) -> OpeningAction {
+    match event {
+        Event::Key(key)
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && is_quit_key(key) =>
+        {
+            OpeningAction::Quit
+        }
+        _ => OpeningAction::Continue,
+    }
+}
+
+fn is_quit_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        || key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 impl ParticleField {
@@ -270,265 +381,6 @@ impl TinyRng {
     }
 }
 
-fn build_suggestions(repo_path: &Path, worktree_stats: DiffStats) -> Vec<LandingSuggestion> {
-    let mut suggestions = Vec::new();
-    let mut seen = HashSet::new();
-
-    push_worktree_suggestion(&mut suggestions, &mut seen, worktree_stats);
-    push_changed_suggestion(
-        &mut suggestions,
-        &mut seen,
-        repo_path,
-        "Review staged changes".to_string(),
-        "enza diff --cached".to_string(),
-        DiffTarget::Cached,
-        None,
-        "Staged for the next commit",
-    );
-
-    if let Ok(repo) = Repository::discover(repo_path) {
-        if let Some(upstream) = current_upstream(&repo) {
-            push_changed_suggestion(
-                &mut suggestions,
-                &mut seen,
-                repo_path,
-                "Review branch changes since upstream".to_string(),
-                format!("enza diff {upstream}...HEAD"),
-                DiffTarget::MergeBaseRange {
-                    base: upstream.clone(),
-                    head: "HEAD".to_string(),
-                },
-                None,
-                "Compared from the merge base with upstream",
-            );
-            push_changed_suggestion(
-                &mut suggestions,
-                &mut seen,
-                repo_path,
-                "Review unpushed commits".to_string(),
-                format!("enza diff {upstream}..HEAD"),
-                DiffTarget::Range {
-                    base: upstream.clone(),
-                    head: "HEAD".to_string(),
-                },
-                None,
-                "Commits on this branch that are not upstream",
-            );
-            push_changed_suggestion(
-                &mut suggestions,
-                &mut seen,
-                repo_path,
-                "Review incoming upstream changes".to_string(),
-                format!("enza diff HEAD..{upstream}"),
-                DiffTarget::Range {
-                    base: "HEAD".to_string(),
-                    head: upstream,
-                },
-                None,
-                "Upstream commits not in this branch",
-            );
-        }
-
-        for base in ["main", "master"] {
-            if revision_exists(&repo, base) {
-                push_changed_suggestion(
-                    &mut suggestions,
-                    &mut seen,
-                    repo_path,
-                    format!("Review branch changes since {base}"),
-                    format!("enza diff {base}...HEAD"),
-                    DiffTarget::MergeBaseRange {
-                        base: base.to_string(),
-                        head: "HEAD".to_string(),
-                    },
-                    None,
-                    &format!("Compared from the merge base with {base}"),
-                );
-            }
-        }
-
-        for (base, title, context) in [
-            (
-                "HEAD~1",
-                "Review the last commit",
-                "Changes introduced by the most recent commit",
-            ),
-            (
-                "HEAD~5",
-                "Review recent commits",
-                "Changes across the last five commits",
-            ),
-        ] {
-            if revision_exists(&repo, base) {
-                push_changed_suggestion(
-                    &mut suggestions,
-                    &mut seen,
-                    repo_path,
-                    title.to_string(),
-                    format!("enza diff {base}..HEAD"),
-                    DiffTarget::Range {
-                        base: base.to_string(),
-                        head: "HEAD".to_string(),
-                    },
-                    None,
-                    context,
-                );
-            }
-        }
-    }
-
-    for (filter, title, context) in [
-        (
-            "M",
-            "Review modified files only",
-            "Working tree files changed in place",
-        ),
-        (
-            "A",
-            "Review added files only",
-            "New or untracked working tree files",
-        ),
-        (
-            "D",
-            "Review deleted files only",
-            "Working tree files removed from disk",
-        ),
-    ] {
-        let Some(diff_filter) = DiffFilter::parse(filter) else {
-            continue;
-        };
-        push_changed_suggestion(
-            &mut suggestions,
-            &mut seen,
-            repo_path,
-            title.to_string(),
-            format!("enza diff --diff-filter {filter}"),
-            DiffTarget::Worktree,
-            Some(diff_filter),
-            context,
-        );
-    }
-
-    suggestions
-}
-
-fn push_worktree_suggestion(
-    suggestions: &mut Vec<LandingSuggestion>,
-    seen: &mut HashSet<String>,
-    stats: DiffStats,
-) {
-    let command = "enza diff".to_string();
-    if !seen.insert(command.clone()) {
-        return;
-    }
-
-    let detail = if stats.has_changes() {
-        format!("Changes not yet staged. {}", stats.summary())
-    } else {
-        "No working tree changes".to_string()
-    };
-
-    suggestions.push(LandingSuggestion {
-        title: "Review your working tree".to_string(),
-        command,
-        detail,
-        target: DiffTarget::Worktree,
-        diff_filter: None,
-    });
-}
-
-fn push_changed_suggestion(
-    suggestions: &mut Vec<LandingSuggestion>,
-    seen: &mut HashSet<String>,
-    repo_path: &Path,
-    title: String,
-    command: String,
-    target: DiffTarget,
-    diff_filter: Option<DiffFilter>,
-    context: &str,
-) {
-    if !seen.insert(command.clone()) {
-        return;
-    }
-
-    let Some(stats) = load_stats(repo_path, &target, diff_filter.as_ref()) else {
-        return;
-    };
-
-    if !stats.has_changes() {
-        return;
-    }
-
-    suggestions.push(LandingSuggestion {
-        title,
-        command,
-        detail: format!("{context}. {}", stats.summary()),
-        target,
-        diff_filter,
-    });
-}
-
-fn load_stats(
-    repo_path: &Path,
-    target: &DiffTarget,
-    diff_filter: Option<&DiffFilter>,
-) -> Option<DiffStats> {
-    let session = DiffSession::load_from_repo(repo_path, target, diff_filter).ok()?;
-    Some(stats_for_session(&session))
-}
-
-fn stats_for_session(session: &DiffSession) -> DiffStats {
-    let mut stats = DiffStats {
-        files: session.files.len(),
-        ..DiffStats::default()
-    };
-
-    for file in &session.files {
-        stats.hunks += file.hunks.len();
-        let (additions, deletions) = file.change_counts();
-        stats.additions += additions;
-        stats.deletions += deletions;
-    }
-
-    stats
-}
-
-fn current_upstream(repo: &Repository) -> Option<String> {
-    let head = repo.head().ok()?;
-    if !head.is_branch() {
-        return None;
-    }
-
-    let branch_name = head.shorthand()?;
-    let branch = repo.find_branch(branch_name, BranchType::Local).ok()?;
-    let upstream = branch.upstream().ok()?;
-    upstream.name().ok().flatten().map(str::to_string)
-}
-
-fn revision_exists(repo: &Repository, revision: &str) -> bool {
-    repo.revparse_single(revision).is_ok()
-}
-
-impl DiffStats {
-    fn has_changes(self) -> bool {
-        self.files > 0 || self.hunks > 0 || self.additions > 0 || self.deletions > 0
-    }
-
-    fn summary(self) -> String {
-        format!(
-            "{} {}, +{}, -{}",
-            self.files,
-            plural(self.files, "file", "files"),
-            self.additions,
-            self.deletions
-        )
-    }
-}
-
-fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
-    if count == 1 { singular } else { plural }
-}
-
 fn particle_count(stats: DiffStats) -> usize {
     let total_changes = stats.additions.saturating_add(stats.deletions);
     let scaled = (total_changes as f32).sqrt() as usize / 2;
@@ -595,48 +447,6 @@ fn particle_color(low: (u8, u8, u8), high: (u8, u8, u8), intensity: f32) -> Colo
     };
 
     Color::Rgb(mix(low.0, high.0), mix(low.1, high.1), mix(low.2, high.2))
-}
-
-fn handle_event(app: &mut LandingApp, event: Event) -> LandingAction {
-    match event {
-        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            handle_key_event(app, key)
-        }
-        Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                app.next();
-                LandingAction::Continue
-            }
-            MouseEventKind::ScrollUp => {
-                app.previous();
-                LandingAction::Continue
-            }
-            _ => LandingAction::Continue,
-        },
-        _ => LandingAction::Continue,
-    }
-}
-
-fn handle_key_event(app: &mut LandingApp, key: KeyEvent) -> LandingAction {
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('q') | KeyCode::Esc, _) => LandingAction::Quit,
-        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            LandingAction::Quit
-        }
-        (KeyCode::Char('j') | KeyCode::Down, _) => {
-            app.next();
-            LandingAction::Continue
-        }
-        (KeyCode::Char('k') | KeyCode::Up, _) => {
-            app.previous();
-            LandingAction::Continue
-        }
-        (KeyCode::Enter, _) => app
-            .select()
-            .map(LandingAction::Open)
-            .unwrap_or(LandingAction::Continue),
-        _ => LandingAction::Continue,
-    }
 }
 
 fn render(frame: &mut Frame<'_>, app: &LandingApp) {
@@ -815,7 +625,77 @@ fn centered_width(area: Rect, width: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::{BASELINE_PARTICLE_COUNT, DiffStats, MAX_PARTICLE_COUNT, particle_count};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::{
+        BASELINE_PARTICLE_COUNT, LandingApp, LandingData, LandingSuggestion, MAX_PARTICLE_COUNT,
+        OpeningAction, handle_opening_event, particle_count, render,
+    };
+    use crate::diff::{DiffStats, DiffTarget};
+
+    #[test]
+    fn landing_starts_with_an_openable_worktree_while_loading() {
+        let app = LandingApp::new();
+
+        assert_eq!(app.suggestions.len(), 1);
+        assert_eq!(app.suggestions[0].command, "enza diff");
+        assert_eq!(
+            app.suggestions[0].detail,
+            "Calculating repository changes..."
+        );
+        assert_eq!(app.select().unwrap().target, DiffTarget::Worktree);
+    }
+
+    #[test]
+    fn initial_frame_renders_the_loading_state() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = LandingApp::new();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Calculating repository changes..."));
+    }
+
+    #[test]
+    fn loaded_suggestions_replace_the_placeholder_and_preserve_selection() {
+        let mut app = LandingApp::new();
+        app.apply_data(LandingData {
+            suggestions: vec![
+                suggestion("enza diff --cached", DiffTarget::Cached),
+                suggestion("enza diff", DiffTarget::Worktree),
+            ],
+            worktree_stats: DiffStats {
+                files: 2,
+                additions: 16,
+                ..DiffStats::default()
+            },
+        });
+
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.select().unwrap().target, DiffTarget::Worktree);
+        assert_eq!(app.particles.particles.len(), BASELINE_PARTICLE_COUNT + 4);
+    }
+
+    #[test]
+    fn opening_phase_ignores_selection_input_but_accepts_quit() {
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            handle_opening_event(enter),
+            OpeningAction::Continue
+        ));
+
+        let quit = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(handle_opening_event(quit), OpeningAction::Quit));
+    }
 
     #[test]
     fn particle_count_keeps_a_baseline_for_clean_worktrees() {
@@ -832,7 +712,6 @@ mod tests {
                 files: 2,
                 additions: 16,
                 deletions: 0,
-                ..DiffStats::default()
             }),
             BASELINE_PARTICLE_COUNT + 4
         );
@@ -842,9 +721,18 @@ mod tests {
                 files: MAX_PARTICLE_COUNT.saturating_mul(2),
                 additions: 0,
                 deletions: 0,
-                ..DiffStats::default()
             }),
             MAX_PARTICLE_COUNT
         );
+    }
+
+    fn suggestion(command: &str, target: DiffTarget) -> LandingSuggestion {
+        LandingSuggestion {
+            title: "Review changes".to_string(),
+            command: command.to_string(),
+            detail: "Details".to_string(),
+            target,
+            diff_filter: None,
+        }
     }
 }

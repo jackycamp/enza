@@ -86,6 +86,15 @@ fn run_app(
     diff_load.field("hunks", session.num_hunks());
     diff_load.field("lines", session.num_lines());
 
+    run_loaded_app(terminal, repo_path, diff_target, session)
+}
+
+fn run_loaded_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    repo_path: &Path,
+    diff_target: &DiffTarget,
+    session: DiffSession,
+) -> io::Result<()> {
     let repo_root = discover_repo_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let mut app =
         App::new_with_review_context(session, ReviewContext::new(repo_root, diff_target.clone()));
@@ -165,14 +174,9 @@ fn run_landing_flow(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     repo_path: &Path,
 ) -> io::Result<()> {
-    let Some(selection) = landing::run_landing_page(terminal, repo_path)? else {
+    let Some(loaded) = landing::run_landing_page(terminal, repo_path)? else {
         return Ok(());
     };
 
-    run_app(
-        terminal,
-        repo_path,
-        &selection.target,
-        selection.diff_filter.as_ref(),
-    )
+    run_loaded_app(terminal, repo_path, &loaded.target, loaded.session)
 }
