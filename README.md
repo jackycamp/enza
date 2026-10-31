@@ -70,7 +70,10 @@ enza --version
 
 ## Features and Usage
 
-TODO
+Press Ctrl+C on a file header or anywhere in its body to collapse the file.
+Press Ctrl+C on the collapsed header to reopen it. A green check mark identifies
+files you have viewed by collapsing them. The check mark remains after reopening
+until you exit the session.
 
 ## Build and run on macOS
 

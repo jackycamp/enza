@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn planner_expands_after_the_selected_hunk_to_cover_the_viewport() {
         let session = session_with_hunks(4);
-        let layout_plan = LayoutPlan::new(&session);
+        let layout_plan = LayoutPlan::new(&session, &[]);
         let plan = HunkLoadPlan::new(
             &layout_plan,
             HunkWindowTarget {
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn planner_uses_overscan_on_both_sides() {
         let session = session_with_hunks(4);
-        let layout_plan = LayoutPlan::new(&session);
+        let layout_plan = LayoutPlan::new(&session, &[]);
         let plan = HunkLoadPlan::new(
             &layout_plan,
             HunkWindowTarget {
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn planner_orders_visible_hunks_before_overscan() {
         let session = session_with_hunks(5);
-        let layout_plan = LayoutPlan::new(&session);
+        let layout_plan = LayoutPlan::new(&session, &[]);
         let plan = HunkLoadPlan::new(
             &layout_plan,
             HunkWindowTarget {
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn planner_prioritizes_hunks_intersecting_the_visible_row_window() {
         let session = session_with_hunks(5);
-        let layout_plan = LayoutPlan::new(&session);
+        let layout_plan = LayoutPlan::new(&session, &[]);
         let visible_start = layout_plan.files[0].hunks[1].start;
         let plan = HunkLoadPlan::new(
             &layout_plan,

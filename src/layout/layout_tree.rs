@@ -9,10 +9,11 @@ use ratatui::text::Line;
 use crate::diff::{DiffFile, DiffHunk, DiffSession};
 use crate::highlight::FileHighlighter;
 use crate::layout::lines::{
-    InlineDiffLine, build_combined_side_line, file_header_line, file_separator_line,
-    file_side_by_side_header_line, hunk_header_line, side_by_side_hunk_header_line,
+    FileHeaderRenderer, FileHeaderSelection, InlineDiffLine, build_combined_side_line,
+    file_separator_line, hunk_header_line, side_by_side_hunk_header_line,
 };
-use crate::layout::primitives::{LayoutWidths, RenderRow, RowContext};
+use crate::layout::primitives::{FileDisplayState, LayoutWidths, RenderRow, RowContext};
+use crate::layout::window::LayoutBuildOptions;
 
 #[derive(Clone, Debug)]
 pub struct LayoutTree {
@@ -20,15 +21,36 @@ pub struct LayoutTree {
 }
 
 impl LayoutTree {
-    pub(super) fn new(session: &DiffSession, widths: LayoutWidths) -> Self {
+    pub(super) fn new(session: &DiffSession, options: LayoutBuildOptions<'_>) -> Self {
         let files = session
             .files
             .iter()
             .enumerate()
-            .map(|(file_index, file)| FileNode::new(file_index, file, widths))
+            .map(|(file_index, file)| {
+                FileNode::new(
+                    file_index,
+                    file,
+                    options.widths,
+                    options.display.file_state(file_index),
+                )
+            })
             .collect();
 
         Self { files }
+    }
+
+    pub(super) fn refresh_file_header(
+        &mut self,
+        session: &DiffSession,
+        widths: LayoutWidths,
+        file_index: usize,
+        state: FileDisplayState,
+    ) {
+        if let Some(node) = self.files.get_mut(file_index)
+            && let Some(file) = session.files.get(file_index)
+        {
+            node.header = FileNode::header(file_index, file, widths, state);
+        }
     }
 }
 
@@ -39,38 +61,54 @@ pub struct FileNode {
 }
 
 impl FileNode {
-    fn new(file_index: usize, file: &DiffFile, widths: LayoutWidths) -> Self {
-        let header = CachedRows {
-            inline_rows: vec![
-                RenderRow::static_line(file_separator_line(widths.inline)),
-                RenderRow::file_header(
-                    file_index,
-                    file_header_line(file, false, widths.inline),
-                    file_header_line(file, true, widths.inline),
-                ),
-            ],
-            side_by_side_rows: vec![
-                RenderRow::static_line(file_separator_line(widths.side_by_side)),
-                RenderRow::file_header(
-                    file_index,
-                    file_side_by_side_header_line(file, false, widths.side_by_side),
-                    file_side_by_side_header_line(file, true, widths.side_by_side),
-                ),
-            ],
-            row_contexts: vec![
-                RowContext::separator(file_index),
-                RowContext::file_header(file_index),
-            ],
-        };
-
+    fn new(
+        file_index: usize,
+        file: &DiffFile,
+        widths: LayoutWidths,
+        state: FileDisplayState,
+    ) -> Self {
+        let header = Self::header(file_index, file, widths, state);
         let hunks = file
             .hunks
             .iter()
             .enumerate()
             .map(|(hunk_index, _)| HunkNode::unbuilt(file_index, hunk_index))
             .collect();
-
         Self { header, hunks }
+    }
+
+    fn header(
+        file_index: usize,
+        file: &DiffFile,
+        widths: LayoutWidths,
+        state: FileDisplayState,
+    ) -> CachedRows {
+        let mut renderer = FileHeaderRenderer::new(file);
+        if state.viewed {
+            renderer = renderer.with_viewed_marker();
+        }
+        CachedRows {
+            inline_rows: vec![
+                RenderRow::static_line(file_separator_line(widths.inline)),
+                RenderRow::file_header(
+                    file_index,
+                    renderer.inline(widths.inline, FileHeaderSelection::Normal),
+                    renderer.inline(widths.inline, FileHeaderSelection::Selected),
+                ),
+            ],
+            side_by_side_rows: vec![
+                RenderRow::static_line(file_separator_line(widths.side_by_side)),
+                RenderRow::file_header(
+                    file_index,
+                    renderer.side_by_side(widths.side_by_side, FileHeaderSelection::Normal),
+                    renderer.side_by_side(widths.side_by_side, FileHeaderSelection::Selected),
+                ),
+            ],
+            row_contexts: vec![
+                RowContext::separator(file_index),
+                RowContext::file_header(file_index),
+            ],
+        }
     }
 }
 

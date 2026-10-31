@@ -9,7 +9,7 @@ use crate::diff::DiffSession;
 use crate::layout::hunk_load_plan::HunkLoadPlan;
 use crate::layout::layout_tree::{CachedRows, HunkNode, LayoutTree, NodeStatus};
 use crate::layout::primitives::LayoutPlan;
-use crate::layout::primitives::LayoutWidths;
+use crate::layout::primitives::{LayoutDisplayContext, LayoutWidths};
 use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
 
 /// Selection and viewport inputs used to choose which hunks are loaded.
@@ -28,8 +28,9 @@ pub(crate) struct HunkWindowTarget {
 }
 
 /// Terminal widths and the initial hunk window for a full layout build.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LayoutBuildOptions {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LayoutBuildOptions<'a> {
+    pub display: LayoutDisplayContext<'a>,
     pub widths: LayoutWidths,
     pub target: HunkWindowTarget,
 }

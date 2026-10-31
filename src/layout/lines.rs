@@ -22,24 +22,100 @@ pub fn file_separator_line(width: usize) -> Line<'static> {
     ))
 }
 
-/// Builds the inline-mode file header line.
-pub fn file_header_line(file: &DiffFile, selected: bool, width: usize) -> Line<'static> {
-    let label = if file.new_path != "/dev/null" {
-        file.new_path.as_str()
-    } else {
-        file.old_path.as_str()
-    };
-
-    header_line(width, label, file, selected)
+/// File labels and counts shared by all cached header variants.
+pub(super) struct FileHeaderRenderer<'a> {
+    inline_label: &'a str,
+    side_by_side_label: &'a str,
+    additions: usize,
+    deletions: usize,
+    viewed: bool,
 }
 
-/// Builds the side-by-side-mode file header line.
-pub fn file_side_by_side_header_line(
-    file: &DiffFile,
-    selected: bool,
-    width: usize,
-) -> Line<'static> {
-    header_line(width, &file.path, file, selected)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FileHeaderSelection {
+    Normal,
+    Selected,
+}
+
+impl<'a> FileHeaderRenderer<'a> {
+    pub fn new(file: &'a DiffFile) -> Self {
+        let (additions, deletions) = file.change_counts();
+        Self {
+            inline_label: if file.new_path != "/dev/null" {
+                &file.new_path
+            } else {
+                &file.old_path
+            },
+            side_by_side_label: &file.path,
+            additions,
+            deletions,
+            viewed: false,
+        }
+    }
+
+    pub fn with_viewed_marker(mut self) -> Self {
+        self.viewed = true;
+        self
+    }
+
+    pub fn inline(&self, width: usize, selection: FileHeaderSelection) -> Line<'static> {
+        self.render(self.inline_label, width, selection)
+    }
+
+    pub fn side_by_side(&self, width: usize, selection: FileHeaderSelection) -> Line<'static> {
+        self.render(self.side_by_side_label, width, selection)
+    }
+
+    fn render(&self, label: &str, width: usize, selection: FileHeaderSelection) -> Line<'static> {
+        let (additions, deletions) = (self.additions, self.deletions);
+        let background = if selection == FileHeaderSelection::Selected {
+            SELECTED_FILE_HEADER_BACKGROUND
+        } else {
+            FILE_HEADER_BACKGROUND
+        };
+        let title_style = if selection == FileHeaderSelection::Selected {
+            Style::default()
+                .fg(Color::White)
+                .bg(background)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Gray)
+                .bg(background)
+                .add_modifier(Modifier::BOLD)
+        };
+
+        let additions_style = Style::default()
+            .fg(Color::Green)
+            .bg(background)
+            .add_modifier(Modifier::BOLD);
+        let deletions_style = Style::default()
+            .fg(Color::Red)
+            .bg(background)
+            .add_modifier(Modifier::BOLD);
+        let divider_style = Style::default().fg(Color::DarkGray).bg(background);
+
+        let suffix = format!("+{additions}, -{deletions}");
+        let marker = if self.viewed { " ✓" } else { "" };
+        let available_label_width =
+            width.saturating_sub(suffix.chars().count() + marker.chars().count() + 2);
+        let label = fit_text(&format!(" {label}"), available_label_width.max(1))
+            .trim_end()
+            .to_string();
+        let rendered_width =
+            label.chars().count() + marker.chars().count() + suffix.chars().count() + 2;
+        let trailing = " ".repeat(width.saturating_sub(rendered_width));
+
+        Line::from(vec![
+            Span::styled(marker, additions_style),
+            Span::styled(label, title_style),
+            Span::styled("  ".to_string(), divider_style),
+            Span::styled(format!("+{additions}"), additions_style),
+            Span::styled(", ".to_string(), divider_style),
+            Span::styled(format!("-{deletions}"), deletions_style),
+            Span::styled(trailing, divider_style),
+        ])
+    }
 }
 
 /// Builds the inline-mode hunk header line.
@@ -175,54 +251,6 @@ pub fn split_side_by_side_width(width: usize) -> (usize, usize) {
     let left = usable / 2;
     let right = usable.saturating_sub(left);
     (left, right)
-}
-
-/// Builds the shared file header line with file label and change counts.
-fn header_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Line<'static> {
-    let (additions, deletions) = file.change_counts();
-    let background = if selected {
-        SELECTED_FILE_HEADER_BACKGROUND
-    } else {
-        FILE_HEADER_BACKGROUND
-    };
-    let title_style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .bg(background)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::Gray)
-            .bg(background)
-            .add_modifier(Modifier::BOLD)
-    };
-
-    let additions_style = Style::default()
-        .fg(Color::Green)
-        .bg(background)
-        .add_modifier(Modifier::BOLD);
-    let deletions_style = Style::default()
-        .fg(Color::Red)
-        .bg(background)
-        .add_modifier(Modifier::BOLD);
-    let divider_style = Style::default().fg(Color::DarkGray).bg(background);
-
-    let suffix = format!("+{additions}, -{deletions}");
-    let available_label_width = width.saturating_sub(suffix.chars().count());
-    let label = fit_text(&format!(" {label}"), available_label_width.max(1))
-        .trim_end()
-        .to_string();
-    let rendered_width = label.chars().count() + suffix.chars().count();
-    let trailing = " ".repeat(width.saturating_sub(rendered_width));
-
-    Line::from(vec![
-        Span::styled(label, title_style),
-        Span::styled("  ".to_string(), divider_style),
-        Span::styled(format!("+{additions}"), additions_style),
-        Span::styled(", ".to_string(), divider_style),
-        Span::styled(format!("-{deletions}"), deletions_style),
-        Span::styled(trailing, divider_style),
-    ])
 }
 
 struct InlineDiffStyle<'a> {
@@ -444,9 +472,9 @@ impl DiffLine {
 #[cfg(test)]
 mod tests {
     use super::{
-        FILE_HEADER_BACKGROUND, INLINE_CODE_INDENT, SELECTED_FILE_HEADER_BACKGROUND,
-        SIDE_BY_SIDE_CODE_INDENT, display_hunk_header, file_header_line, hunk_header_line,
-        side_by_side_hunk_header_line,
+        FILE_HEADER_BACKGROUND, FileHeaderRenderer, FileHeaderSelection, INLINE_CODE_INDENT,
+        SELECTED_FILE_HEADER_BACKGROUND, SIDE_BY_SIDE_CODE_INDENT, display_hunk_header,
+        hunk_header_line, side_by_side_hunk_header_line,
     };
     use crate::diff::{DiffFile, DiffHunk, DiffLine};
     use ratatui::text::Line;
@@ -489,7 +517,7 @@ mod tests {
     #[test]
     fn file_headers_apply_background_to_every_span() {
         let file = sample_file();
-        let normal = file_header_line(&file, false, 40);
+        let normal = FileHeaderRenderer::new(&file).inline(40, FileHeaderSelection::Normal);
         assert!(
             normal
                 .spans
@@ -497,12 +525,55 @@ mod tests {
                 .all(|span| span.style.bg == Some(FILE_HEADER_BACKGROUND))
         );
 
-        let selected = file_header_line(&file, true, 40);
+        let selected = FileHeaderRenderer::new(&file).inline(40, FileHeaderSelection::Selected);
         assert!(
             selected
                 .spans
                 .iter()
                 .all(|span| span.style.bg == Some(SELECTED_FILE_HEADER_BACKGROUND))
+        );
+    }
+
+    #[test]
+    fn file_header_variants_preserve_labels_counts_marker_and_width() {
+        let mut file = sample_file();
+        file.path = "old.rs → new.rs".into();
+        file.new_path = "new.rs".into();
+        file.old_path = "old.rs".into();
+        let renderer = FileHeaderRenderer::new(&file).with_viewed_marker();
+        assert!(
+            plain_text(renderer.inline(40, FileHeaderSelection::Normal)).starts_with(" ✓ new.rs")
+        );
+        assert!(
+            plain_text(renderer.side_by_side(40, FileHeaderSelection::Normal))
+                .starts_with(" ✓ old.rs → new.rs")
+        );
+        for selection in [FileHeaderSelection::Normal, FileHeaderSelection::Selected] {
+            let background = if selection == FileHeaderSelection::Selected {
+                SELECTED_FILE_HEADER_BACKGROUND
+            } else {
+                FILE_HEADER_BACKGROUND
+            };
+            for width in [16, 32, 80] {
+                for line in [
+                    renderer.inline(width, selection),
+                    renderer.side_by_side(width, selection),
+                ] {
+                    assert_eq!(line.width(), width);
+                    assert!(
+                        line.spans
+                            .iter()
+                            .all(|span| span.style.bg == Some(background))
+                    );
+                    assert_eq!(line.spans[0].style.fg, Some(ratatui::style::Color::Green));
+                    assert!(plain_text(line).contains("+1, -1"));
+                }
+            }
+        }
+        file.new_path = "/dev/null".into();
+        assert!(
+            plain_text(FileHeaderRenderer::new(&file).inline(40, FileHeaderSelection::Normal))
+                .starts_with(" old.rs")
         );
     }
 

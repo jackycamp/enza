@@ -1,3 +1,4 @@
+use crate::layout::LayoutDisplayContext;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout as FrameLayout, Rect},
@@ -63,23 +64,23 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         .as_ref()
         .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row));
 
+    let display = LayoutDisplayContext {
+        file_states: &app.main_pane.file_states,
+        notes: &app.notes.items,
+        expanded_note_ids: &app.notes.expanded_ids,
+        reply_composer_note_id: app.notes.reply_composer_note_id(),
+    };
     if needs_rebuild {
         app.layout = Some(DiffLayout::build(
             &app.session,
-            &app.notes.items,
-            &app.notes.expanded_ids,
-            app.notes.reply_composer_note_id(),
-            LayoutBuildOptions { widths, target },
+            LayoutBuildOptions {
+                widths,
+                target,
+                display,
+            },
         ));
     } else if let Some(layout) = &mut app.layout {
-        let _ = layout.ensure_hunk_window(
-            &app.layout_worker,
-            &app.session,
-            &app.notes.items,
-            &app.notes.expanded_ids,
-            app.notes.reply_composer_note_id(),
-            target,
-        );
+        let _ = layout.ensure_hunk_window(&app.layout_worker, &app.session, display, target);
     }
 
     if let Some(context) = previous_cursor
@@ -123,9 +124,12 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     if let Some(layout) = &mut app.layout {
         let _ = layout.ensure_selected_hunk_ready_sync(
             &app.session,
-            &app.notes.items,
-            &app.notes.expanded_ids,
-            app.notes.reply_composer_note_id(),
+            LayoutDisplayContext {
+                notes: &app.notes.items,
+                expanded_note_ids: &app.notes.expanded_ids,
+                reply_composer_note_id: app.notes.reply_composer_note_id(),
+                file_states: &app.main_pane.file_states,
+            },
             app.main_pane.selected_file,
             app.main_pane.selected_hunk,
         );
@@ -135,31 +139,26 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
         return;
     };
 
-    let Some(range) = layout.hunk_ranges.iter().find(|range| {
-        range.file_index == app.main_pane.selected_file
-            && range.hunk_index == app.main_pane.selected_hunk
-    }) else {
+    let header_row = layout.row_index_for_context(
+        &app.session,
+        crate::layout::RowContext::file_header(app.main_pane.selected_file),
+    );
+    let hunk_row = layout
+        .hunk_ranges
+        .iter()
+        .find(|range| {
+            range.file_index == app.main_pane.selected_file
+                && range.hunk_index == app.main_pane.selected_hunk
+        })
+        .map(|range| range.start);
+    let Some(row) = hunk_row.or(header_row) else {
         return;
     };
-
-    app.main_pane.cursor_row = range.start;
+    app.main_pane.cursor_row = row;
     app.main_pane.scroll = if app.main_pane.selected_hunk == 0 {
-        layout
-            .row_index_for_context(
-                &app.session,
-                crate::layout::RowContext {
-                    file_index: Some(app.main_pane.selected_file),
-                    hunk_index: None,
-                    kind: crate::layout::RowKind::FileHeader,
-                    old_lineno: None,
-                    new_lineno: None,
-                    note_id: None,
-                    note_row_offset: 0,
-                },
-            )
-            .unwrap_or(range.start) as u16
+        header_row.unwrap_or(row) as u16
     } else {
-        range.start as u16
+        row as u16
     };
     ensure_cursor_visible(app, area);
 }

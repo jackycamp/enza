@@ -1,4 +1,5 @@
 use crate::diff::DiffSession;
+use crate::layout::LayoutDisplayContext;
 use crate::layout::base_layout::BaseLayout;
 use crate::layout::note::{
     build_note_rows, note_wrap_width, render_note_rows, render_side_by_side_note_rows,
@@ -7,7 +8,7 @@ use crate::layout::plan::plan_row_contexts;
 use crate::layout::primitives::{
     HunkRange, LayoutWidths, NoteInsertion, RenderRow, RowContext, RowKind,
 };
-use crate::note::{Note, NoteId, NoteTarget};
+use crate::note::{Note, NoteTarget};
 
 pub(super) struct NoteOverlay {
     pub insertions: Vec<NoteInsertion>,
@@ -19,9 +20,7 @@ pub(super) struct NoteOverlay {
 pub(super) struct NoteOverlayRequest<'a> {
     pub session: &'a DiffSession,
     pub base: &'a BaseLayout,
-    pub notes: &'a [Note],
-    pub expanded_note_ids: &'a [NoteId],
-    pub reply_composer_note_id: Option<NoteId>,
+    pub display: LayoutDisplayContext<'a>,
     pub widths: LayoutWidths,
 }
 
@@ -145,7 +144,7 @@ struct NoteInsertions {
 
 impl NoteInsertions {
     fn new(request: NoteOverlayRequest<'_>) -> Self {
-        if request.notes.is_empty() {
+        if request.display.notes.is_empty() {
             return Self {
                 insertions: Vec::new(),
                 inserted_before_or_at_base: vec![0usize; request.base.plan.row_count + 1],
@@ -154,7 +153,8 @@ impl NoteInsertions {
         }
 
         let base_row_contexts = plan_row_contexts(request.session, &request.base.plan);
-        let note_anchors = build_note_anchors(request.session, request.notes, &base_row_contexts);
+        let note_anchors =
+            build_note_anchors(request.session, request.display.notes, &base_row_contexts);
         let mut insertions = Vec::new();
         let mut inserted_before_or_at_base = vec![0usize; request.base.plan.row_count + 1];
         let mut inserted_total = 0usize;
@@ -162,10 +162,15 @@ impl NoteInsertions {
             for note in note_anchors
                 .iter()
                 .filter(|(anchor_index, _)| *anchor_index == base_index)
+                .filter(|_| {
+                    base_row_contexts[base_index]
+                        .file_index
+                        .is_some_and(|index| !request.display.file_state(index).collapsed)
+                })
                 .map(|(_, note)| note)
             {
-                let expanded = request.expanded_note_ids.contains(&note.id);
-                let composer_active = request.reply_composer_note_id == Some(note.id);
+                let expanded = request.display.expanded_note_ids.contains(&note.id);
+                let composer_active = request.display.reply_composer_note_id == Some(note.id);
                 let note_rows = build_note_rows(
                     note,
                     note_wrap_width(note, request.widths.inline, request.widths.side_by_side),
@@ -243,7 +248,7 @@ mod tests {
     #[test]
     fn note_anchors_resolve_file_hunk_line_and_range_targets() {
         let session = session_with_one_hunk();
-        let plan = LayoutPlan::new(&session);
+        let plan = LayoutPlan::new(&session, &[]);
         let contexts = plan_row_contexts(&session, &plan);
         let notes = vec![
             Note::new(
@@ -308,9 +313,12 @@ mod tests {
         let overlay = NoteOverlay::new(NoteOverlayRequest {
             session: &session,
             base: &base,
-            notes: &[note],
-            expanded_note_ids: &[1],
-            reply_composer_note_id: Some(1),
+            display: LayoutDisplayContext {
+                notes: &[note],
+                expanded_note_ids: &[1],
+                reply_composer_note_id: Some(1),
+                ..LayoutDisplayContext::default()
+            },
             widths: widths(),
         });
 
@@ -334,9 +342,10 @@ mod tests {
         let overlay = NoteOverlay::new(NoteOverlayRequest {
             session: &session,
             base: &base,
-            notes: &[note],
-            expanded_note_ids: &[],
-            reply_composer_note_id: None,
+            display: LayoutDisplayContext {
+                notes: &[note],
+                ..LayoutDisplayContext::default()
+            },
             widths: widths(),
         });
 
@@ -347,9 +356,22 @@ mod tests {
     }
 
     fn base_layout(session: &DiffSession) -> BaseLayout {
-        let plan = LayoutPlan::new(session);
+        let plan = LayoutPlan::new(session, &[]);
         BaseLayout {
-            tree: LayoutTree::new(session, widths()),
+            tree: LayoutTree::new(
+                session,
+                crate::layout::LayoutBuildOptions {
+                    widths: widths(),
+                    target: crate::layout::HunkWindowTarget {
+                        selected_file: 0,
+                        selected_hunk: 0,
+                        visible_start_row: None,
+                        viewport_rows: 1,
+                        overscan_rows: 0,
+                    },
+                    display: LayoutDisplayContext::default(),
+                },
+            ),
             hunk_ranges: plan.hunk_ranges.clone(),
             plan,
         }
