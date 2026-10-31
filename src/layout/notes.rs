@@ -162,6 +162,12 @@ impl NoteInsertions {
             for note in note_anchors
                 .iter()
                 .filter(|(anchor_index, _)| *anchor_index == base_index)
+                .filter(|_| {
+                    base_row_contexts[base_index]
+                        .file_index
+                        .and_then(|index| request.base.plan.files.get(index))
+                        .is_some_and(|file| !file.collapsed)
+                })
                 .map(|(_, note)| note)
             {
                 let expanded = request.expanded_note_ids.contains(&note.id);
@@ -243,7 +249,7 @@ mod tests {
     #[test]
     fn note_anchors_resolve_file_hunk_line_and_range_targets() {
         let session = session_with_one_hunk();
-        let plan = LayoutPlan::new(&session);
+        let plan = LayoutPlan::new(&session, &[]);
         let contexts = plan_row_contexts(&session, &plan);
         let notes = vec![
             Note::new(
@@ -347,9 +353,9 @@ mod tests {
     }
 
     fn base_layout(session: &DiffSession) -> BaseLayout {
-        let plan = LayoutPlan::new(session);
+        let plan = LayoutPlan::new(session, &[]);
         BaseLayout {
-            tree: LayoutTree::new(session, widths()),
+            tree: LayoutTree::new(session, widths(), &[]),
             hunk_ranges: plan.hunk_ranges.clone(),
             plan,
         }

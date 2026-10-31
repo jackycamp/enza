@@ -1,6 +1,6 @@
 use crate::diff::DiffSession;
 use crate::layout::layout_tree::LayoutTree;
-use crate::layout::primitives::{HunkRange, LayoutPlan, LayoutWidths};
+use crate::layout::primitives::{FileDisplayState, HunkRange, LayoutPlan, LayoutWidths};
 use crate::layout::window::{HunkWindowTarget, apply_loaded_hunk_window_sync};
 use crate::log;
 
@@ -16,11 +16,12 @@ impl BaseLayout {
         session: &DiffSession,
         widths: LayoutWidths,
         target: HunkWindowTarget,
+        file_states: &[FileDisplayState],
     ) -> Self {
         let mut timer = log::timer("layout_build_base");
         timer.field("files", session.files.len());
-        let plan = LayoutPlan::new(session);
-        let mut tree = LayoutTree::new(session, widths);
+        let plan = LayoutPlan::new(session, file_states);
+        let mut tree = LayoutTree::new(session, widths, file_states);
         let window = apply_loaded_hunk_window_sync(&mut tree, &plan, session, widths, target);
         let hunk_ranges = plan.hunk_ranges.clone();
 

@@ -150,6 +150,13 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
             }
             FocusPane::Files => NavAction::None,
         },
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => match app.global.focus {
+            FocusPane::Main => {
+                app.toggle_current_file_collapsed();
+                NavAction::SyncSelectionToScroll
+            }
+            FocusPane::Files => NavAction::None,
+        },
         (KeyCode::Char('c'), _) => match app.global.focus {
             FocusPane::Main => {
                 app.cancel_current_agent();
@@ -234,3 +241,6 @@ fn handle_note_input_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         _ => NavAction::None,
     }
 }
+
+#[cfg(test)]
+mod tests;

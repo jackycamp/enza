@@ -14,7 +14,7 @@ use super::layout_tree::NodeStatus;
 fn viewport_growth_after_a_resize_can_load_more_hunks() {
     let session = session_with_hunks(4);
     let worker = LayoutWorker::new(Arc::new(session.clone()));
-    let mut layout = Layout::build(&session, &[], &[], None, build_options(0, 1, 0));
+    let mut layout = Layout::build(&session, &[], &[], None, build_options(0, 1, 0), &[]);
 
     layout.ensure_hunk_window(&worker, &session, &[], &[], None, window_target(0, 100, 0));
 
@@ -38,7 +38,7 @@ fn viewport_growth_after_a_resize_can_load_more_hunks() {
 fn moving_the_window_evicts_hunks_outside_it() {
     let session = session_with_hunks(4);
     let worker = LayoutWorker::new(Arc::new(session.clone()));
-    let mut layout = Layout::build(&session, &[], &[], None, build_options(0, 1, 0));
+    let mut layout = Layout::build(&session, &[], &[], None, build_options(0, 1, 0), &[]);
     assert_eq!(layout.base.tree.files[0].hunks[0].status, NodeStatus::Ready);
     let original_contexts = plan_row_contexts(&session, &layout.base.plan);
     let original_hunk_starts = hunk_starts(&layout);
@@ -70,7 +70,7 @@ fn moving_the_window_evicts_hunks_outside_it() {
 #[test]
 fn last_row_belongs_to_the_last_hunk_not_a_file_spacer() {
     let session = session_with_hunks(4);
-    let layout = Layout::build(&session, &[], &[], None, build_options(3, 1, 0));
+    let layout = Layout::build(&session, &[], &[], None, build_options(3, 1, 0), &[]);
 
     let last_context = layout
         .row_context(&session, layout.row_count - 1)
@@ -85,7 +85,7 @@ fn last_row_belongs_to_the_last_hunk_not_a_file_spacer() {
 fn moving_the_window_target_does_not_advance_the_layout_generation() {
     let session = session_with_hunks(5);
     let worker = LayoutWorker::new(Arc::new(session.clone()));
-    let mut layout = Layout::build(&session, &[], &[], None, build_options(0, 1, 0));
+    let mut layout = Layout::build(&session, &[], &[], None, build_options(0, 1, 0), &[]);
 
     layout.ensure_hunk_window(&worker, &session, &[], &[], None, window_target(1, 1, 0));
     let generation = layout.target_state.generation;
@@ -164,4 +164,36 @@ fn hunk_starts(layout: &Layout) -> Vec<(usize, usize, usize)> {
         .iter()
         .map(|range| (range.file_index, range.hunk_index, range.start))
         .collect()
+}
+
+#[test]
+fn collapsed_files_stay_hidden_when_worker_results_arrive() {
+    let session = session_with_hunks(4);
+    let worker = LayoutWorker::new(Arc::new(session.clone()));
+    let mut layout = Layout::build(&session, &[], &[], None, build_options(0, 1, 0), &[]);
+    layout.ensure_hunk_window(&worker, &session, &[], &[], None, window_target(3, 1, 0));
+    let states = [super::FileDisplayState {
+        collapsed: true,
+        viewed: true,
+    }];
+    layout.update_file_states(&session, &states, &[], &[], None);
+    for _ in 0..5 {
+        layout.ensure_hunk_window(&worker, &session, &[], &[], None, window_target(3, 1, 0));
+        assert_eq!(layout.row_count, 2);
+        assert!(layout.hunk_ranges.is_empty());
+        assert_eq!(
+            layout.row_context(&session, 1).unwrap().kind,
+            RowKind::FileHeader
+        );
+        assert!(!layout.ensure_selected_hunk_ready_sync(&session, &[], &[], None, 0, 3));
+        thread::sleep(Duration::from_millis(5));
+    }
+    let rebuilt = Layout::build(&session, &[], &[], None, build_options(3, 1, 0), &states);
+    assert!(
+        rebuilt.base.tree.files[0]
+            .hunks
+            .iter()
+            .all(|hunk| hunk.status == NodeStatus::Unbuilt)
+    );
+    assert_eq!(rebuilt.row_count, 2);
 }

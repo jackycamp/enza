@@ -11,7 +11,8 @@ use crate::diff::DiffSession;
 use crate::layout::layout_tree::{CachedRows, LayoutTree, NodeStatus};
 use crate::layout::lines::{hunk_header_line, side_by_side_hunk_header_line};
 use crate::layout::primitives::{
-    HunkRange, LayoutPlan, PlannedFile, PlannedHunk, RenderRow, RowContext, RowId, RowKind,
+    FileDisplayState, HunkRange, LayoutPlan, PlannedFile, PlannedHunk, RenderRow, RowContext,
+    RowId, RowKind,
 };
 
 impl LayoutPlan {
@@ -19,7 +20,7 @@ impl LayoutPlan {
     ///
     /// Rows include file separators, file headers, hunk headers, diff lines, and
     /// spacer rows. The plan stores only file/hunk start rows and row counts.
-    pub(super) fn new(session: &DiffSession) -> Self {
+    pub(super) fn new(session: &DiffSession, file_states: &[FileDisplayState]) -> Self {
         let mut files = Vec::new();
         let mut hunk_ranges = Vec::new();
         let mut row_count = 0usize;
@@ -28,8 +29,11 @@ impl LayoutPlan {
             let file_start = row_count;
             row_count += 2;
 
-            let mut hunks = Vec::with_capacity(file.hunks.len());
-            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+            let collapsed = file_states
+                .get(file_index)
+                .is_some_and(|state| state.collapsed);
+            let mut hunks = Vec::new();
+            for (hunk_index, hunk) in file.hunks.iter().enumerate().filter(|_| !collapsed) {
                 let start = row_count;
                 hunk_ranges.push(HunkRange {
                     file_index,
@@ -46,6 +50,7 @@ impl LayoutPlan {
             }
 
             files.push(PlannedFile {
+                collapsed,
                 file_index,
                 start: file_start,
                 end: row_count,

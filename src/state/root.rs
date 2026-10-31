@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use crate::agent::{
     AgentRuntime, MentionParseError, ParsedNoteInput, ReviewContext, parse_note_input,
 };
+use crate::diff::DiffSession;
 #[cfg(test)]
-use crate::diff::DiffTarget;
-use crate::diff::{DiffFile, DiffSession};
-use crate::layout::{Layout, LayoutWorker, RowContext};
+use crate::diff::{DiffFile, DiffTarget};
+use crate::layout::{FileDisplayState, Layout, LayoutWorker, RowContext};
 #[cfg(test)]
 use crate::note::AgentProvider;
 use crate::note::{Note, NoteTarget};
@@ -47,6 +47,7 @@ impl App {
     }
 
     pub fn new_with_review_context(session: DiffSession, review: ReviewContext) -> Self {
+        let file_states = vec![FileDisplayState::default(); session.files.len()];
         let session = Arc::new(session);
         Self {
             session: Arc::clone(&session),
@@ -60,6 +61,7 @@ impl App {
                 debug_pane_open: false,
             },
             main_pane: MainPaneState {
+                file_states,
                 selected_file: 0,
                 selected_hunk: 0,
                 cursor_row: 0,
@@ -139,32 +141,62 @@ impl App {
         }
     }
 
-    pub fn next_hunk(&mut self) {
-        let Some(current_file) = self.current_file() else {
+    pub fn toggle_current_file_collapsed(&mut self) {
+        let Some(file_index) = self.cursor_context().and_then(|context| context.file_index) else {
             return;
         };
-        if self.main_pane.selected_hunk + 1 < current_file.hunks.len() {
-            self.main_pane.selected_hunk += 1;
-        } else if self.main_pane.selected_file + 1 < self.session.files.len() {
-            self.main_pane.selected_file += 1;
-            self.main_pane.selected_hunk = 0;
+        let Some(state) = self.main_pane.file_states.get_mut(file_index) else {
+            return;
+        };
+        state.collapsed = !state.collapsed;
+        state.viewed = true;
+        let visual_offset = self
+            .main_pane
+            .cursor_row
+            .saturating_sub(self.main_pane.scroll as usize);
+        if let Some(layout) = &mut self.layout {
+            layout.update_file_states(
+                &self.session,
+                &self.main_pane.file_states,
+                &self.notes.items,
+                &self.notes.expanded_ids,
+                self.notes.reply_composer_note_id(),
+            );
         }
+        self.main_pane.selection_anchor = None;
+        self.remap_cursor_to_context(RowContext::file_header(file_index));
+        self.main_pane.scroll = self.main_pane.cursor_row.saturating_sub(visual_offset) as u16;
+        self.sync_selection_to_cursor();
+    }
+
+    pub fn next_hunk(&mut self) {
+        self.move_hunk(true);
     }
 
     pub fn previous_hunk(&mut self) {
-        if self.main_pane.selected_hunk > 0 {
-            self.main_pane.selected_hunk -= 1;
-        } else if self.main_pane.selected_file > 0 {
-            self.main_pane.selected_file -= 1;
-            self.main_pane.selected_hunk = self
-                .current_file()
-                .map(|file| file.hunks.len().saturating_sub(1))
-                .unwrap_or(0);
-        }
+        self.move_hunk(false);
     }
 
-    pub fn current_file(&self) -> Option<&DiffFile> {
-        self.session.files.get(self.main_pane.selected_file)
+    fn move_hunk(&mut self, forward: bool) {
+        let current = (self.main_pane.selected_file, self.main_pane.selected_hunk);
+        let hunks = self
+            .session
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !self.main_pane.file_states[*index].collapsed)
+            .flat_map(|(file_index, file)| {
+                (0..file.hunks.len()).map(move |hunk_index| (file_index, hunk_index))
+            });
+        let target = if forward {
+            hunks.filter(|key| *key > current).min()
+        } else {
+            hunks.filter(|key| *key < current).max()
+        };
+        if let Some((file, hunk)) = target {
+            self.main_pane.selected_file = file;
+            self.main_pane.selected_hunk = hunk;
+        }
     }
 
     pub fn move_cursor_down(&mut self, amount: usize, max_row: usize) {
@@ -544,7 +576,7 @@ mod tests {
     #[test]
     fn navigation_across_an_unloaded_hunk_preserves_the_target() {
         let mut app = app_with_hunks(4);
-        let layout = Layout::build(&app.session, &[], &[], None, build_options(0, 1, 0));
+        let layout = Layout::build(&app.session, &[], &[], None, build_options(0, 1, 0), &[]);
 
         let boundary = row_for(&app.session, &layout, 1, RowKind::Spacer);
         app.layout = Some(layout);
@@ -588,6 +620,7 @@ mod tests {
             &[],
             None,
             build_options(1, 1, 0),
+            &[],
         ));
 
         let selected_context = RowContext {
@@ -637,6 +670,7 @@ mod tests {
             &[],
             None,
             build_options(1, 1, 0),
+            &[],
         ));
 
         let anchor_context = RowContext {
@@ -709,6 +743,7 @@ mod tests {
             &[],
             None,
             build_options(2, 1, 0),
+            &[],
         ));
 
         let cursor_context = RowContext {
@@ -755,6 +790,7 @@ mod tests {
             &[],
             None,
             build_options(0, 20, 0),
+            &[],
         ));
         app.add_note(
             NoteTarget::File {
@@ -810,6 +846,7 @@ mod tests {
             &[],
             None,
             build_options(0, 20, 0),
+            &[],
         ));
         app.add_note(
             NoteTarget::Line {
@@ -855,6 +892,7 @@ mod tests {
             &[],
             None,
             build_options(1, 1, 0),
+            &[],
         ));
 
         app.add_note(
@@ -901,6 +939,7 @@ mod tests {
             &[],
             None,
             build_options(0, 20, 0),
+            &[],
         ));
         let mut note = Note::new_agent(
             1,

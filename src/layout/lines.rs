@@ -23,23 +23,29 @@ pub fn file_separator_line(width: usize) -> Line<'static> {
 }
 
 /// Builds the inline-mode file header line.
-pub fn file_header_line(file: &DiffFile, selected: bool, width: usize) -> Line<'static> {
+pub fn file_header_line(
+    file: &DiffFile,
+    selected: bool,
+    viewed: bool,
+    width: usize,
+) -> Line<'static> {
     let label = if file.new_path != "/dev/null" {
         file.new_path.as_str()
     } else {
         file.old_path.as_str()
     };
 
-    header_line(width, label, file, selected)
+    header_line(width, label, file, selected, viewed)
 }
 
 /// Builds the side-by-side-mode file header line.
 pub fn file_side_by_side_header_line(
     file: &DiffFile,
     selected: bool,
+    viewed: bool,
     width: usize,
 ) -> Line<'static> {
-    header_line(width, &file.path, file, selected)
+    header_line(width, &file.path, file, selected, viewed)
 }
 
 /// Builds the inline-mode hunk header line.
@@ -178,7 +184,13 @@ pub fn split_side_by_side_width(width: usize) -> (usize, usize) {
 }
 
 /// Builds the shared file header line with file label and change counts.
-fn header_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Line<'static> {
+fn header_line(
+    width: usize,
+    label: &str,
+    file: &DiffFile,
+    selected: bool,
+    viewed: bool,
+) -> Line<'static> {
     let (additions, deletions) = file.change_counts();
     let background = if selected {
         SELECTED_FILE_HEADER_BACKGROUND
@@ -208,14 +220,18 @@ fn header_line(width: usize, label: &str, file: &DiffFile, selected: bool) -> Li
     let divider_style = Style::default().fg(Color::DarkGray).bg(background);
 
     let suffix = format!("+{additions}, -{deletions}");
-    let available_label_width = width.saturating_sub(suffix.chars().count());
+    let marker = if viewed { " ✓" } else { "" };
+    let available_label_width =
+        width.saturating_sub(suffix.chars().count() + marker.chars().count() + 2);
     let label = fit_text(&format!(" {label}"), available_label_width.max(1))
         .trim_end()
         .to_string();
-    let rendered_width = label.chars().count() + suffix.chars().count();
+    let rendered_width =
+        label.chars().count() + marker.chars().count() + suffix.chars().count() + 2;
     let trailing = " ".repeat(width.saturating_sub(rendered_width));
 
     Line::from(vec![
+        Span::styled(marker, additions_style),
         Span::styled(label, title_style),
         Span::styled("  ".to_string(), divider_style),
         Span::styled(format!("+{additions}"), additions_style),
@@ -489,7 +505,7 @@ mod tests {
     #[test]
     fn file_headers_apply_background_to_every_span() {
         let file = sample_file();
-        let normal = file_header_line(&file, false, 40);
+        let normal = file_header_line(&file, false, false, 40);
         assert!(
             normal
                 .spans
@@ -497,7 +513,7 @@ mod tests {
                 .all(|span| span.style.bg == Some(FILE_HEADER_BACKGROUND))
         );
 
-        let selected = file_header_line(&file, true, 40);
+        let selected = file_header_line(&file, true, false, 40);
         assert!(
             selected
                 .spans

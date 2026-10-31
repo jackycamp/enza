@@ -16,12 +16,14 @@ use ratatui::{
 
 use crate::diff::DiffSession;
 use crate::layout::base_layout::BaseLayout;
-use crate::layout::layout_tree::HunkNode;
+use crate::layout::layout_tree::{FileNode, HunkNode};
 use crate::layout::notes::{NoteOverlay, NoteOverlayRequest};
 use crate::layout::plan::{
     plan_row_index_for_context, plan_row_to_render_rows, row_context_for_plan_row,
 };
-use crate::layout::primitives::{HunkRange, LayoutRowLocation, NoteInsertion, RenderRow};
+use crate::layout::primitives::{
+    HunkRange, LayoutPlan, LayoutRowLocation, NoteInsertion, RenderRow,
+};
 use crate::layout::window::{LoadedHunkLimits, LoadedHunkWindowRequest, apply_loaded_hunk_window};
 use crate::log;
 use crate::note::Note;
@@ -43,7 +45,7 @@ mod worker;
 pub use layout_tree::NodeStatus;
 pub(crate) use note::{DiffSide, note_side, styled_mentions, width_for_side};
 pub(crate) use primitives::LayoutWidths;
-pub use primitives::{RowContext, RowKind, RowViewState};
+pub use primitives::{FileDisplayState, RowContext, RowKind, RowViewState};
 pub(crate) use window::{HunkWindowTarget, LayoutBuildOptions};
 pub use worker::LayoutWorker;
 
@@ -81,6 +83,7 @@ impl Layout {
         expanded_note_ids: &[u64],
         reply_composer_note_id: Option<u64>,
         options: LayoutBuildOptions,
+        file_states: &[FileDisplayState],
     ) -> Self {
         let mut timer = log::timer("layout_build");
         timer.field("files", session.files.len());
@@ -92,7 +95,7 @@ impl Layout {
         timer.field("viewport_rows", options.target.viewport_rows);
         timer.field("overscan_rows", options.target.overscan_rows);
 
-        let base = BaseLayout::new(session, options.widths, options.target);
+        let base = BaseLayout::new(session, options.widths, options.target, file_states);
         let mut layout = Self {
             inline_width: options.widths.inline,
             side_by_side_width: options.widths.side_by_side,
@@ -114,6 +117,29 @@ impl Layout {
         timer.field("base_rows", layout.base.plan.row_count);
         timer.field("rows", layout.row_count);
         layout
+    }
+
+    /// Updates file visibility without discarding compatible hunk caches.
+    pub fn update_file_states(
+        &mut self,
+        session: &DiffSession,
+        file_states: &[FileDisplayState],
+        notes: &[Note],
+        expanded_note_ids: &[u64],
+        reply_composer_note_id: Option<u64>,
+    ) {
+        self.base.plan = LayoutPlan::new(session, file_states);
+        self.base.hunk_ranges = self.base.plan.hunk_ranges.clone();
+        let widths = self.widths();
+        for (index, file) in session.files.iter().enumerate() {
+            self.base.tree.files[index].header = FileNode::header(
+                index,
+                file,
+                widths,
+                file_states.get(index).is_some_and(|state| state.viewed),
+            );
+        }
+        self.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
     }
 
     /// Updates loaded hunk rows for a new viewport or selected hunk.
@@ -226,6 +252,15 @@ impl Layout {
         selected_file: usize,
         selected_hunk: usize,
     ) -> bool {
+        if !self
+            .base
+            .plan
+            .hunk_ranges
+            .iter()
+            .any(|range| range.file_index == selected_file && range.hunk_index == selected_hunk)
+        {
+            return false;
+        }
         let Some(file) = session.files.get(selected_file) else {
             return false;
         };

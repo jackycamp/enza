@@ -149,8 +149,15 @@ pub struct PlannedHunk {
     pub line_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileDisplayState {
+    pub collapsed: bool,
+    pub viewed: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedFile {
+    pub collapsed: bool,
     pub file_index: usize,
     /// Base row index of the file separator.
     pub start: usize,

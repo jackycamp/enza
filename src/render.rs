@@ -70,6 +70,7 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
             &app.notes.expanded_ids,
             app.notes.reply_composer_note_id(),
             LayoutBuildOptions { widths, target },
+            &app.main_pane.file_states,
         ));
     } else if let Some(layout) = &mut app.layout {
         let _ = layout.ensure_hunk_window(
@@ -135,31 +136,26 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
         return;
     };
 
-    let Some(range) = layout.hunk_ranges.iter().find(|range| {
-        range.file_index == app.main_pane.selected_file
-            && range.hunk_index == app.main_pane.selected_hunk
-    }) else {
+    let header_row = layout.row_index_for_context(
+        &app.session,
+        crate::layout::RowContext::file_header(app.main_pane.selected_file),
+    );
+    let hunk_row = layout
+        .hunk_ranges
+        .iter()
+        .find(|range| {
+            range.file_index == app.main_pane.selected_file
+                && range.hunk_index == app.main_pane.selected_hunk
+        })
+        .map(|range| range.start);
+    let Some(row) = hunk_row.or(header_row) else {
         return;
     };
-
-    app.main_pane.cursor_row = range.start;
+    app.main_pane.cursor_row = row;
     app.main_pane.scroll = if app.main_pane.selected_hunk == 0 {
-        layout
-            .row_index_for_context(
-                &app.session,
-                crate::layout::RowContext {
-                    file_index: Some(app.main_pane.selected_file),
-                    hunk_index: None,
-                    kind: crate::layout::RowKind::FileHeader,
-                    old_lineno: None,
-                    new_lineno: None,
-                    note_id: None,
-                    note_row_offset: 0,
-                },
-            )
-            .unwrap_or(range.start) as u16
+        header_row.unwrap_or(row) as u16
     } else {
-        range.start as u16
+        row as u16
     };
     ensure_cursor_visible(app, area);
 }
