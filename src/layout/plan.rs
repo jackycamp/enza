@@ -50,7 +50,6 @@ impl LayoutPlan {
             }
 
             files.push(PlannedFile {
-                collapsed,
                 file_index,
                 start: file_start,
                 end: row_count,

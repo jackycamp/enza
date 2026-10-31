@@ -16,7 +16,7 @@ use ratatui::{
 
 use crate::diff::DiffSession;
 use crate::layout::base_layout::BaseLayout;
-use crate::layout::layout_tree::{FileNode, HunkNode};
+use crate::layout::layout_tree::HunkNode;
 use crate::layout::notes::{NoteOverlay, NoteOverlayRequest};
 use crate::layout::plan::{
     plan_row_index_for_context, plan_row_to_render_rows, row_context_for_plan_row,
@@ -26,7 +26,6 @@ use crate::layout::primitives::{
 };
 use crate::layout::window::{LoadedHunkLimits, LoadedHunkWindowRequest, apply_loaded_hunk_window};
 use crate::log;
-use crate::note::Note;
 
 mod base_layout;
 mod hunk_load_plan;
@@ -44,8 +43,8 @@ mod worker;
 
 pub use layout_tree::NodeStatus;
 pub(crate) use note::{DiffSide, note_side, styled_mentions, width_for_side};
-pub(crate) use primitives::LayoutWidths;
 pub use primitives::{FileDisplayState, RowContext, RowKind, RowViewState};
+pub(crate) use primitives::{LayoutDisplayContext, LayoutWidths};
 pub(crate) use window::{HunkWindowTarget, LayoutBuildOptions};
 pub use worker::LayoutWorker;
 
@@ -77,17 +76,11 @@ impl Layout {
     /// This synchronously builds rows for the selected area so the first frame
     /// has visible content. Later movement should use
     /// `ensure_hunk_window` so already-loaded hunk rows can be reused.
-    pub fn build(
-        session: &DiffSession,
-        notes: &[Note],
-        expanded_note_ids: &[u64],
-        reply_composer_note_id: Option<u64>,
-        options: LayoutBuildOptions,
-        file_states: &[FileDisplayState],
-    ) -> Self {
+    pub fn build(session: &DiffSession, options: LayoutBuildOptions<'_>) -> Self {
+        let display = options.display;
         let mut timer = log::timer("layout_build");
         timer.field("files", session.files.len());
-        timer.field("notes", notes.len());
+        timer.field("notes", display.notes.len());
         timer.field("inline_width", options.widths.inline);
         timer.field("side_width", options.widths.side_by_side);
         timer.field("selected_file", options.target.selected_file);
@@ -95,7 +88,7 @@ impl Layout {
         timer.field("viewport_rows", options.target.viewport_rows);
         timer.field("overscan_rows", options.target.overscan_rows);
 
-        let base = BaseLayout::new(session, options.widths, options.target, file_states);
+        let base = BaseLayout::new(session, options);
         let mut layout = Self {
             inline_width: options.widths.inline,
             side_by_side_width: options.widths.side_by_side,
@@ -113,33 +106,30 @@ impl Layout {
             note_insertions: Vec::new(),
             row_count: 0,
         };
-        layout.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
+        layout.refresh_notes(session, display);
         timer.field("base_rows", layout.base.plan.row_count);
         timer.field("rows", layout.row_count);
         layout
     }
 
-    /// Updates file visibility without discarding compatible hunk caches.
+    /// Updates visibility and only the header whose viewed marker changed.
     pub fn update_file_states(
         &mut self,
         session: &DiffSession,
-        file_states: &[FileDisplayState],
-        notes: &[Note],
-        expanded_note_ids: &[u64],
-        reply_composer_note_id: Option<u64>,
+        display: LayoutDisplayContext<'_>,
+        viewed_file: Option<usize>,
     ) {
-        self.base.plan = LayoutPlan::new(session, file_states);
+        self.base.plan = LayoutPlan::new(session, display.file_states);
         self.base.hunk_ranges = self.base.plan.hunk_ranges.clone();
-        let widths = self.widths();
-        for (index, file) in session.files.iter().enumerate() {
-            self.base.tree.files[index].header = FileNode::header(
-                index,
-                file,
-                widths,
-                file_states.get(index).is_some_and(|state| state.viewed),
+        if let Some(file_index) = viewed_file {
+            self.base.tree.refresh_file_header(
+                session,
+                self.widths(),
+                file_index,
+                display.file_state(file_index),
             );
         }
-        self.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
+        self.refresh_notes(session, display);
     }
 
     /// Updates loaded hunk rows for a new viewport or selected hunk.
@@ -151,9 +141,7 @@ impl Layout {
         &mut self,
         worker: &LayoutWorker,
         session: &DiffSession,
-        notes: &[Note],
-        expanded_note_ids: &[u64],
-        reply_composer_note_id: Option<u64>,
+        display: LayoutDisplayContext<'_>,
         target: HunkWindowTarget,
     ) -> bool {
         if !self.target_state.generation_ready {
@@ -188,7 +176,7 @@ impl Layout {
         let flatten_ms = flatten_start.elapsed().as_millis();
 
         let note_start = Instant::now();
-        self.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
+        self.refresh_notes(session, display);
         let note_ms = note_start.elapsed().as_millis();
         let mut fields = vec![
             ("elapsed_ms", expand_start.elapsed().as_millis().to_string()),
@@ -246,9 +234,7 @@ impl Layout {
     pub fn ensure_selected_hunk_ready_sync(
         &mut self,
         session: &DiffSession,
-        notes: &[Note],
-        expanded_note_ids: &[u64],
-        reply_composer_note_id: Option<u64>,
+        display: LayoutDisplayContext<'_>,
         selected_file: usize,
         selected_hunk: usize,
     ) -> bool {
@@ -280,7 +266,7 @@ impl Layout {
 
         *hunk_node = HunkNode::ready(selected_file, selected_hunk, &file.path, hunk, widths);
 
-        self.refresh_notes(session, notes, expanded_note_ids, reply_composer_note_id);
+        self.refresh_notes(session, display);
         true
     }
 
@@ -288,23 +274,15 @@ impl Layout {
     ///
     /// Base layout rows are left untouched; only note insertions and derived
     /// row counts/ranges are refreshed.
-    pub fn refresh_notes(
-        &mut self,
-        session: &DiffSession,
-        notes: &[Note],
-        expanded_note_ids: &[u64],
-        reply_composer_note_id: Option<u64>,
-    ) {
+    pub fn refresh_notes(&mut self, session: &DiffSession, display: LayoutDisplayContext<'_>) {
         let mut timer = log::timer("layout_refresh_notes");
-        timer.field("notes", notes.len());
-        timer.field("expanded_notes", expanded_note_ids.len());
+        timer.field("notes", display.notes.len());
+        timer.field("expanded_notes", display.expanded_note_ids.len());
         timer.field("base_rows", self.base.plan.row_count);
         let overlay = NoteOverlay::new(NoteOverlayRequest {
             session,
             base: &self.base,
-            notes,
-            expanded_note_ids,
-            reply_composer_note_id,
+            display,
             widths: self.widths(),
         });
 

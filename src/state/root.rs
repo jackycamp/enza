@@ -14,7 +14,7 @@ use crate::agent::{
 use crate::diff::DiffSession;
 #[cfg(test)]
 use crate::diff::{DiffFile, DiffTarget};
-use crate::layout::{FileDisplayState, Layout, LayoutWorker, RowContext};
+use crate::layout::{FileDisplayState, Layout, LayoutDisplayContext, LayoutWorker, RowContext};
 #[cfg(test)]
 use crate::note::AgentProvider;
 use crate::note::{Note, NoteTarget};
@@ -148,6 +148,7 @@ impl App {
         let Some(state) = self.main_pane.file_states.get_mut(file_index) else {
             return;
         };
+        let viewed_file = (!state.viewed).then_some(file_index);
         state.collapsed = !state.collapsed;
         state.viewed = true;
         let visual_offset = self
@@ -157,10 +158,13 @@ impl App {
         if let Some(layout) = &mut self.layout {
             layout.update_file_states(
                 &self.session,
-                &self.main_pane.file_states,
-                &self.notes.items,
-                &self.notes.expanded_ids,
-                self.notes.reply_composer_note_id(),
+                LayoutDisplayContext {
+                    file_states: &self.main_pane.file_states,
+                    notes: &self.notes.items,
+                    expanded_note_ids: &self.notes.expanded_ids,
+                    reply_composer_note_id: self.notes.reply_composer_note_id(),
+                },
+                viewed_file,
             );
         }
         self.main_pane.selection_anchor = None;
@@ -472,9 +476,12 @@ impl App {
         if let Some(layout) = &mut self.layout {
             layout.refresh_notes(
                 &self.session,
-                &self.notes.items,
-                &self.notes.expanded_ids,
-                self.notes.reply_composer_note_id(),
+                LayoutDisplayContext {
+                    notes: &self.notes.items,
+                    expanded_note_ids: &self.notes.expanded_ids,
+                    reply_composer_note_id: self.notes.reply_composer_note_id(),
+                    file_states: &self.main_pane.file_states,
+                },
             );
         }
         if let Some(context) = cursor_context {
@@ -549,8 +556,9 @@ mod tests {
         selected_hunk: usize,
         viewport_rows: usize,
         overscan_rows: usize,
-    ) -> LayoutBuildOptions {
+    ) -> LayoutBuildOptions<'static> {
         LayoutBuildOptions {
+            display: LayoutDisplayContext::default(),
             widths: LayoutWidths {
                 inline: 80,
                 side_by_side: 80,
@@ -576,7 +584,7 @@ mod tests {
     #[test]
     fn navigation_across_an_unloaded_hunk_preserves_the_target() {
         let mut app = app_with_hunks(4);
-        let layout = Layout::build(&app.session, &[], &[], None, build_options(0, 1, 0), &[]);
+        let layout = Layout::build(&app.session, build_options(0, 1, 0));
 
         let boundary = row_for(&app.session, &layout, 1, RowKind::Spacer);
         app.layout = Some(layout);
@@ -590,9 +598,7 @@ mod tests {
         app.layout.as_mut().unwrap().ensure_hunk_window(
             &app.layout_worker,
             &app.session,
-            &[],
-            &[],
-            None,
+            LayoutDisplayContext::default(),
             window_target(app.main_pane.selected_hunk, 1, 0),
         );
         let new_max_row = app.layout.as_ref().unwrap().row_count - 1;
@@ -614,14 +620,7 @@ mod tests {
     #[test]
     fn rendering_visible_rows_preserves_both_selection_endpoints() {
         let mut app = app_with_hunks(3);
-        app.layout = Some(Layout::build(
-            &app.session,
-            &[],
-            &[],
-            None,
-            build_options(1, 1, 0),
-            &[],
-        ));
+        app.layout = Some(Layout::build(&app.session, build_options(1, 1, 0)));
 
         let selected_context = RowContext {
             file_index: Some(0),
@@ -644,7 +643,7 @@ mod tests {
         app.layout
             .as_mut()
             .unwrap()
-            .ensure_selected_hunk_ready_sync(&app.session, &[], &[], None, 0, 0);
+            .ensure_selected_hunk_ready_sync(&app.session, LayoutDisplayContext::default(), 0, 0);
         let remapped_cursor = app
             .layout
             .as_ref()
@@ -664,14 +663,7 @@ mod tests {
     #[test]
     fn note_insertion_preserves_selection_endpoint_identities() {
         let mut app = app_with_hunks(3);
-        app.layout = Some(Layout::build(
-            &app.session,
-            &[],
-            &[],
-            None,
-            build_options(1, 1, 0),
-            &[],
-        ));
+        app.layout = Some(Layout::build(&app.session, build_options(1, 1, 0)));
 
         let anchor_context = RowContext {
             file_index: Some(0),
@@ -737,14 +729,7 @@ mod tests {
     #[test]
     fn note_expansion_preserves_cursor_identity_after_cache_refresh() {
         let mut app = app_with_hunks(3);
-        app.layout = Some(Layout::build(
-            &app.session,
-            &[],
-            &[],
-            None,
-            build_options(2, 1, 0),
-            &[],
-        ));
+        app.layout = Some(Layout::build(&app.session, build_options(2, 1, 0)));
 
         let cursor_context = RowContext {
             file_index: Some(0),
@@ -784,14 +769,7 @@ mod tests {
     #[test]
     fn every_note_row_round_trips_during_cursor_remapping() {
         let mut app = app_with_hunks(1);
-        app.layout = Some(Layout::build(
-            &app.session,
-            &[],
-            &[],
-            None,
-            build_options(0, 20, 0),
-            &[],
-        ));
+        app.layout = Some(Layout::build(&app.session, build_options(0, 20, 0)));
         app.add_note(
             NoteTarget::File {
                 file_path: "test.rs".to_string(),
@@ -840,14 +818,7 @@ mod tests {
     #[test]
     fn contextual_note_input_edits_on_a_note_and_creates_on_the_diff() {
         let mut app = app_with_hunks(1);
-        app.layout = Some(Layout::build(
-            &app.session,
-            &[],
-            &[],
-            None,
-            build_options(0, 20, 0),
-            &[],
-        ));
+        app.layout = Some(Layout::build(&app.session, build_options(0, 20, 0)));
         app.add_note(
             NoteTarget::Line {
                 file_path: "test.rs".to_string(),
@@ -886,14 +857,7 @@ mod tests {
     #[test]
     fn note_before_hunk_header_does_not_move_hunk_range_to_the_note() {
         let mut app = app_with_hunks(3);
-        app.layout = Some(Layout::build(
-            &app.session,
-            &[],
-            &[],
-            None,
-            build_options(1, 1, 0),
-            &[],
-        ));
+        app.layout = Some(Layout::build(&app.session, build_options(1, 1, 0)));
 
         app.add_note(
             NoteTarget::Hunk {
@@ -933,14 +897,7 @@ mod tests {
     #[test]
     fn reply_composer_reserves_rows_inside_the_expanded_agent_note() {
         let mut app = app_with_hunks(1);
-        app.layout = Some(Layout::build(
-            &app.session,
-            &[],
-            &[],
-            None,
-            build_options(0, 20, 0),
-            &[],
-        ));
+        app.layout = Some(Layout::build(&app.session, build_options(0, 20, 0)));
         let mut note = Note::new_agent(
             1,
             NoteTarget::File {
@@ -980,6 +937,45 @@ mod tests {
                 .unwrap()
                 .note_id,
             Some(1)
+        );
+    }
+    #[test]
+    fn agent_note_refresh_keeps_collapsed_file_notes_hidden() {
+        let mut app = app_with_hunks(0);
+        app.layout = Some(Layout::build(&app.session, build_options(0, 10, 0)));
+        app.notes.items.push(Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "test.rs".into(),
+            },
+            AgentProvider::Codex,
+            "Explain this".into(),
+            7,
+        ));
+        app.refresh_note_overlay();
+        assert_eq!(app.layout.as_ref().unwrap().note_insertions.len(), 1);
+        app.remap_cursor_to_context(RowContext::file_header(0));
+        app.toggle_current_file_collapsed();
+        assert!(app.apply_agent_event(crate::agent::AgentEvent::Started {
+            note_id: 1,
+            run_id: 7,
+            started_at: std::time::Instant::now(),
+        }));
+        app.drain_agent_events();
+        assert!(app.layout.as_ref().unwrap().note_insertions.is_empty());
+        assert!(app.apply_agent_event(crate::agent::AgentEvent::Completed {
+            note_id: 1,
+            run_id: 7,
+            session_id: "thread-1".into(),
+            response: "Finished response".into(),
+        }));
+        app.refresh_note_overlay();
+        assert!(app.layout.as_ref().unwrap().note_insertions.is_empty());
+        app.toggle_current_file_collapsed();
+        assert_eq!(app.layout.as_ref().unwrap().note_insertions.len(), 1);
+        assert_eq!(
+            app.notes.items[0].agent_thread().unwrap().messages()[1].body,
+            "Finished response"
         );
     }
 }

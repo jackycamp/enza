@@ -2,6 +2,8 @@ use std::ops::Range;
 
 use ratatui::text::Line;
 
+use crate::note::{Note, NoteId};
+
 #[derive(Clone, Debug)]
 pub struct HunkRange {
     pub file_index: usize,
@@ -155,9 +157,26 @@ pub struct FileDisplayState {
     pub viewed: bool,
 }
 
+/// Presentation inputs borrowed from the current application state.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LayoutDisplayContext<'a> {
+    pub file_states: &'a [FileDisplayState],
+    pub notes: &'a [Note],
+    pub expanded_note_ids: &'a [NoteId],
+    pub reply_composer_note_id: Option<NoteId>,
+}
+
+impl LayoutDisplayContext<'_> {
+    pub fn file_state(self, file_index: usize) -> FileDisplayState {
+        self.file_states
+            .get(file_index)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedFile {
-    pub collapsed: bool,
     pub file_index: usize,
     /// Base row index of the file separator.
     pub start: usize,

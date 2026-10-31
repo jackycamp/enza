@@ -1,3 +1,4 @@
+use crate::layout::LayoutDisplayContext;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout as FrameLayout, Rect},
@@ -63,24 +64,23 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         .as_ref()
         .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row));
 
+    let display = LayoutDisplayContext {
+        file_states: &app.main_pane.file_states,
+        notes: &app.notes.items,
+        expanded_note_ids: &app.notes.expanded_ids,
+        reply_composer_note_id: app.notes.reply_composer_note_id(),
+    };
     if needs_rebuild {
         app.layout = Some(DiffLayout::build(
             &app.session,
-            &app.notes.items,
-            &app.notes.expanded_ids,
-            app.notes.reply_composer_note_id(),
-            LayoutBuildOptions { widths, target },
-            &app.main_pane.file_states,
+            LayoutBuildOptions {
+                widths,
+                target,
+                display,
+            },
         ));
     } else if let Some(layout) = &mut app.layout {
-        let _ = layout.ensure_hunk_window(
-            &app.layout_worker,
-            &app.session,
-            &app.notes.items,
-            &app.notes.expanded_ids,
-            app.notes.reply_composer_note_id(),
-            target,
-        );
+        let _ = layout.ensure_hunk_window(&app.layout_worker, &app.session, display, target);
     }
 
     if let Some(context) = previous_cursor
@@ -124,9 +124,12 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     if let Some(layout) = &mut app.layout {
         let _ = layout.ensure_selected_hunk_ready_sync(
             &app.session,
-            &app.notes.items,
-            &app.notes.expanded_ids,
-            app.notes.reply_composer_note_id(),
+            LayoutDisplayContext {
+                notes: &app.notes.items,
+                expanded_note_ids: &app.notes.expanded_ids,
+                reply_composer_note_id: app.notes.reply_composer_note_id(),
+                file_states: &app.main_pane.file_states,
+            },
             app.main_pane.selected_file,
             app.main_pane.selected_hunk,
         );
