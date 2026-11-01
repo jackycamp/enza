@@ -66,6 +66,7 @@ pub(super) enum NoteRow {
 pub(super) struct RenderedNote {
     pub rows: Vec<Line<'static>>,
     pub composer_bounds: Option<Range<usize>>,
+    pub latest_reply_bounds: Option<Range<usize>>,
 }
 
 pub(super) fn build_note_rows(
@@ -300,7 +301,21 @@ pub(super) fn render_note_rows(note: &Note, rows: &[NoteRow], width: usize) -> R
     rendered.push(Line::from(top_spans));
 
     let mut composer_bounds = None;
+    let mut latest_reply_bounds = None;
+    let mut in_agent_reply = false;
     for row in rows {
+        match row {
+            NoteRow::Author(NoteAuthor::Agent(_)) => {
+                latest_reply_bounds = Some(rendered.len()..rendered.len() + 1);
+                in_agent_reply = true;
+            }
+            NoteRow::Body(_) if in_agent_reply => {
+                if let Some(bounds) = &mut latest_reply_bounds {
+                    bounds.end = rendered.len() + 1;
+                }
+            }
+            _ => in_agent_reply = false,
+        }
         if matches!(row, NoteRow::ComposerSlot) {
             let start = rendered.len();
             rendered.extend(
@@ -321,6 +336,7 @@ pub(super) fn render_note_rows(note: &Note, rows: &[NoteRow], width: usize) -> R
     RenderedNote {
         rows: rendered,
         composer_bounds,
+        latest_reply_bounds,
     }
 }
 
@@ -355,6 +371,7 @@ pub(super) fn render_side_by_side_note_rows(
     RenderedNote {
         rows,
         composer_bounds: rendered.composer_bounds,
+        latest_reply_bounds: rendered.latest_reply_bounds,
     }
 }
 

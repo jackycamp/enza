@@ -35,6 +35,7 @@ pub struct AgentThread {
     provider: AgentProvider,
     messages: Vec<NoteMessage>,
     state: AgentRunState,
+    unread: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +178,17 @@ pub enum NoteTarget {
     },
 }
 
+impl NoteTarget {
+    pub fn file_path(&self) -> &str {
+        match self {
+            Self::File { file_path }
+            | Self::Hunk { file_path, .. }
+            | Self::Line { file_path, .. }
+            | Self::Range { file_path, .. } => file_path,
+        }
+    }
+}
+
 impl Note {
     pub fn new(id: NoteId, target: NoteTarget, body: String) -> Self {
         Self {
@@ -234,6 +246,7 @@ impl AgentThread {
     fn new(provider: AgentProvider, body: String, run_id: RunId) -> Self {
         Self {
             provider,
+            unread: false,
             messages: vec![NoteMessage {
                 author: MessageAuthor::User,
                 body,
@@ -243,6 +256,14 @@ impl AgentThread {
                 session_id: None,
             },
         }
+    }
+
+    pub fn has_unread_reply(&self) -> bool {
+        self.unread
+    }
+
+    pub fn mark_read(&mut self) {
+        self.unread = false;
     }
 
     pub fn provider(&self) -> AgentProvider {
@@ -341,6 +362,7 @@ impl AgentThread {
             body: response,
         });
         self.state = AgentRunState::Ready { session_id };
+        self.unread = true;
         true
     }
 
@@ -422,5 +444,34 @@ mod tests {
         ));
         assert_eq!(thread.last_user_message(), Some("Follow up"));
         assert!(!thread.queue_reply(3, "Duplicate".to_string()));
+    }
+
+    #[test]
+    fn only_accepted_replies_mark_unread_and_each_reply_can_be_read() {
+        let mut note = Note::new_agent(1, target(), AgentProvider::Codex, "prompt".into(), 1);
+        let thread = note.agent_thread_mut().unwrap();
+        assert!(!thread.has_unread_reply());
+        assert!(!thread.complete(1, "s".into(), "early".into()));
+        assert!(thread.mark_running(1, Instant::now()));
+        assert!(!thread.complete(99, "s".into(), "stale".into()));
+        assert!(!thread.has_unread_reply());
+        assert!(thread.complete(1, "s".into(), "answer".into()));
+        assert!(thread.has_unread_reply());
+        thread.mark_read();
+        assert!(!thread.complete(1, "s".into(), "duplicate".into()));
+        assert!(!thread.has_unread_reply());
+        assert!(thread.queue_reply(2, "follow up".into()));
+        assert!(thread.cancel(2));
+        assert!(!thread.has_unread_reply());
+        assert!(thread.queue_retry(3));
+        assert!(thread.fail(
+            3,
+            AgentFailure::new(AgentFailureKind::Timeout, "timeout", true)
+        ));
+        assert!(!thread.has_unread_reply());
+        assert!(thread.queue_retry(4));
+        assert!(thread.mark_running(4, Instant::now()));
+        assert!(thread.complete(4, "s".into(), "new answer".into()));
+        assert!(thread.has_unread_reply());
     }
 }

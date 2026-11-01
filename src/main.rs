@@ -26,20 +26,18 @@ use crate::{
     agent::ReviewContext,
     cli::{Cli, Command},
     diff::{DiffFilter, DiffSession, DiffTarget, discover_repo_root},
-    input::NavAction,
     state::{App, FocusPane},
 };
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
     let repo_path = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
-    let direct_diff = match &cli.command {
-        Some(Command::Diff(args)) => Some((
+    let direct_diff = cli.command.as_ref().map(|Command::Diff(args)| {
+        (
             args.diff_target().unwrap_or_else(|error| error.exit()),
             args.diff_filter().unwrap_or_else(|error| error.exit()),
-        )),
-        None => None,
-    };
+        )
+    });
 
     let mut terminal = setup_terminal()?;
     let result = match direct_diff {
@@ -139,31 +137,7 @@ fn run_loaded_app(
 
         if let Some(action) = input::poll_and_handle_events(&mut app)? {
             let viewport_area = terminal.get_frame().area();
-            render::ensure_layout(&mut app, viewport_area);
-
-            app.clamp_cursor_row(render::max_cursor_row(&app));
-            app.main_pane.scroll = app
-                .main_pane
-                .scroll
-                .min(render::max_scroll(&app, viewport_area));
-
-            match action {
-                NavAction::RevealSelectedHunk => {
-                    render::reveal_selected_hunk(&mut app, viewport_area)
-                }
-                NavAction::SyncSelectionToScroll => {
-                    app.sync_selection_to_cursor();
-                    render::ensure_cursor_visible(&mut app, viewport_area);
-                }
-                NavAction::None => {}
-            }
-
-            app.sync_selection_to_cursor();
-            render::ensure_cursor_visible(&mut app, viewport_area);
-
-            if app.global.focus != FocusPane::Files {
-                app.sync_sidebar_cursor_to_selected_file();
-            }
+            input::complete_navigation(&mut app, viewport_area, action);
         }
     }
 

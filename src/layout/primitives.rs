@@ -209,6 +209,8 @@ pub struct NoteInsertion {
     pub context: RowContext,
     /// Composer rows relative to the start of this insertion.
     pub composer_bounds: Option<Range<usize>>,
+    /// Latest expanded agent response, relative to the insertion start.
+    pub latest_reply_bounds: Option<Range<usize>>,
 }
 
 impl NoteInsertion {

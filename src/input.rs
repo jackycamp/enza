@@ -6,18 +6,22 @@ use crossterm::event::{
 
 use crate::{
     render,
-    state::{App, FocusPane},
+    state::{App, FocusPane, ReplyDirection},
 };
 
 pub enum NavAction {
     None,
     RevealSelectedHunk,
+    RevealAgentReply(u64),
     SyncSelectionToScroll,
 }
 
 impl NavAction {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
+            (_, Self::RevealAgentReply(id)) => Self::RevealAgentReply(id),
+            (Self::RevealAgentReply(id), Self::None) => Self::RevealAgentReply(id),
+            (Self::RevealAgentReply(_), later) => later,
             (_, Self::RevealSelectedHunk) | (Self::RevealSelectedHunk, _) => {
                 Self::RevealSelectedHunk
             }
@@ -26,6 +30,36 @@ impl NavAction {
             }
             _ => Self::None,
         }
+    }
+}
+
+/// Applies pending navigation and keeps the cursor, viewport and sidebar aligned.
+pub fn complete_navigation(app: &mut App, viewport_area: ratatui::layout::Rect, action: NavAction) {
+    render::ensure_layout(app, viewport_area);
+
+    app.clamp_cursor_row(render::max_cursor_row(app));
+    app.main_pane.scroll = app
+        .main_pane
+        .scroll
+        .min(render::max_scroll(app, viewport_area));
+
+    match action {
+        NavAction::RevealSelectedHunk => render::reveal_selected_hunk(app, viewport_area),
+        NavAction::RevealAgentReply(note_id) => {
+            render::reveal_agent_reply(app, viewport_area, note_id);
+        }
+        NavAction::SyncSelectionToScroll => {
+            app.sync_selection_to_cursor();
+            render::ensure_cursor_visible(app, viewport_area);
+        }
+        NavAction::None => {}
+    }
+
+    app.sync_selection_to_cursor();
+    render::ensure_cursor_visible(app, viewport_area);
+
+    if app.global.focus != FocusPane::Files {
+        app.sync_sidebar_cursor_to_selected_file();
     }
 }
 
@@ -50,12 +84,68 @@ fn handle_event(app: &mut App, event: Event) -> NavAction {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             handle_key_event(app, key)
         }
-        Event::Mouse(mouse) => handle_mouse_event(app, mouse),
+        Event::Mouse(mouse) => {
+            app.thread_prefix_pending = false;
+            let before = app.main_pane.cursor_row;
+            let action = handle_mouse_event(app, mouse);
+            if before != app.main_pane.cursor_row {
+                app.acknowledge_focused_reply();
+            }
+            action
+        }
+        Event::Resize(_, _) | Event::FocusLost => {
+            app.thread_prefix_pending = false;
+            NavAction::None
+        }
         _ => NavAction::None,
     }
 }
 
 fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
+    let before = (app.main_pane.cursor_row, app.global.focus);
+    if app.note_input_active() {
+        app.thread_prefix_pending = false;
+        return handle_note_input_key_event(app, key);
+    }
+    if std::mem::take(&mut app.thread_prefix_pending)
+        && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('a' | 'A'))
+    {
+        return if app.jump_to_unread_reply(if key.code == KeyCode::Char('a') {
+            ReplyDirection::Next
+        } else {
+            ReplyDirection::Previous
+        }) {
+            NavAction::RevealAgentReply(
+                app.current_note_id()
+                    .expect("successful reply jump selects a note"),
+            )
+        } else {
+            NavAction::None
+        };
+    }
+    if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::NONE {
+        app.thread_prefix_pending = true;
+        return NavAction::None;
+    }
+    let action = handle_navigation_key(app, key);
+    let focus_moved = before != (app.main_pane.cursor_row, app.global.focus);
+    // Deferred reveals have not established their destination yet.
+    if matches!(action, NavAction::None | NavAction::SyncSelectionToScroll)
+        && (focus_moved || key.code == KeyCode::Enter)
+    {
+        app.acknowledge_focused_reply();
+    }
+    // Opening a reply composer moves the cursor without requesting a reveal.
+    // Preserve that destination when an earlier event requested a reply jump.
+    if focus_moved && matches!(action, NavAction::None) {
+        NavAction::SyncSelectionToScroll
+    } else {
+        action
+    }
+}
+
+fn handle_navigation_key(app: &mut App, key: KeyEvent) -> NavAction {
     if app.note_input_active() {
         return handle_note_input_key_event(app, key);
     }
@@ -546,5 +636,243 @@ mod tests {
                 .hunks
                 .is_empty()
         );
+    }
+
+    fn add_unread_reply(app: &mut App) {
+        let mut note = crate::note::Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "file2.rs".into(),
+            },
+            crate::note::AgentProvider::Codex,
+            "prompt".into(),
+            1,
+        );
+        let thread = note.agent_thread_mut().unwrap();
+        assert!(thread.mark_running(1, std::time::Instant::now()));
+        assert!(thread.complete(1, "s".into(), "new reply".into()));
+        app.notes.items.push(note);
+        app.layout = None;
+        render::ensure_layout(app, AREA);
+    }
+
+    fn key(app: &mut App, ch: char) -> NavAction {
+        handle_key_event(
+            app,
+            KeyEvent::new(
+                KeyCode::Char(ch),
+                if ch.is_uppercase() {
+                    KeyModifiers::SHIFT
+                } else {
+                    KeyModifiers::NONE
+                },
+            ),
+        )
+    }
+
+    #[test]
+    fn reply_keys_work_from_both_panes_and_do_not_intercept_the_composer() {
+        for pane in [FocusPane::Main, FocusPane::Files] {
+            for direction in ['a', 'A'] {
+                let mut app = app();
+                add_unread_reply(&mut app);
+                app.global.focus = pane;
+                key(&mut app, 'g');
+                assert!(matches!(
+                    key(&mut app, direction),
+                    NavAction::RevealAgentReply(1)
+                ));
+                assert_eq!(app.current_note_id(), Some(1));
+                assert_eq!(app.global.focus, FocusPane::Main);
+                assert!(
+                    !app.notes.items[0]
+                        .agent_thread()
+                        .unwrap()
+                        .has_unread_reply()
+                );
+            }
+        }
+        let mut app = app();
+        add_unread_reply(&mut app);
+        app.start_new_note_input();
+        key(&mut app, 'g');
+        key(&mut app, 'a');
+        assert_eq!(app.notes.composer.as_ref().unwrap().draft, "ga");
+        assert!(
+            app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
+        );
+    }
+
+    #[test]
+    fn reply_prefix_cancels_and_hunk_keys_remain_immediate() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.thread_prefix_pending);
+        assert!(matches!(key(&mut app, 'a'), NavAction::None));
+        key(&mut app, 'g');
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!app.thread_prefix_pending);
+        key(&mut app, 'a');
+        assert!(
+            app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
+        );
+        app.global.focus = FocusPane::Main;
+        assert!(matches!(key(&mut app, ']'), NavAction::RevealSelectedHunk));
+        assert_eq!(app.main_pane.selected_hunk, 1);
+        assert!(matches!(key(&mut app, '['), NavAction::RevealSelectedHunk));
+        assert_eq!(app.main_pane.selected_hunk, 0);
+        key(&mut app, 'g');
+        assert!(matches!(key(&mut app, 'n'), NavAction::None));
+        assert!(!app.thread_prefix_pending);
+        assert!(app.note_input_active());
+    }
+
+    #[test]
+    fn frame_sync_and_unrelated_keys_do_not_acknowledge_new_arrivals() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        app.notes.expanded_ids.push(1);
+        app.layout = None;
+        render::ensure_layout(&mut app, AREA);
+        let bounds = app.layout.as_ref().unwrap().latest_reply_bounds(1).unwrap();
+        app.main_pane.cursor_row = bounds.start;
+        app.sync_selection_to_cursor();
+        render::ensure_layout(&mut app, AREA);
+        app.sync_selection_to_cursor();
+        key(&mut app, 'x');
+        assert!(
+            app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
+        );
+        key(&mut app, 'j');
+        assert!(
+            !app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
+        );
+    }
+
+    #[test]
+    fn later_cursor_movement_supersedes_a_reply_jump_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let expected = app.main_pane.cursor_row + 1;
+        let movement = key(&mut app, 'j');
+        complete_navigation(&mut app, AREA, jump.merge(movement));
+        assert_eq!(app.main_pane.cursor_row, expected);
+    }
+
+    #[test]
+    fn later_hunk_movement_supersedes_a_reply_jump_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let movement = key(&mut app, ']');
+        complete_navigation(&mut app, AREA, jump.merge(movement));
+        assert_eq!(
+            (app.main_pane.selected_file, app.main_pane.selected_hunk),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn final_reply_jump_supersedes_earlier_hunk_movement_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        let movement = key(&mut app, ']');
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        complete_navigation(&mut app, AREA, movement.merge(jump));
+        assert_eq!(app.current_note_id(), Some(1));
+        let bounds = app.layout.as_ref().unwrap().latest_reply_bounds(1).unwrap();
+        assert_eq!(app.main_pane.cursor_row, bounds.start);
+    }
+
+    #[test]
+    fn later_composer_input_keeps_its_cursor_after_a_reply_jump() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let composer = key(&mut app, 'n');
+        let typing = key(&mut app, 'x');
+        let expected = app.reply_composer_bounds().unwrap().start;
+        complete_navigation(&mut app, AREA, jump.merge(composer).merge(typing));
+        assert!(app.note_input_active());
+        assert_eq!(app.notes.composer.as_ref().unwrap().draft, "x");
+        assert_eq!(app.main_pane.cursor_row, expected);
+    }
+
+    #[test]
+    fn later_thread_collapse_supersedes_a_reply_jump_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let collapse =
+            handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let expected = app.main_pane.cursor_row;
+        complete_navigation(&mut app, AREA, jump.merge(collapse));
+        assert!(!app.notes.expanded_ids.contains(&1));
+        assert_eq!(app.main_pane.cursor_row, expected);
+    }
+
+    #[test]
+    fn deferred_hunk_reveals_do_not_acknowledge_the_previous_cursor() {
+        for command in ['b', '\n'] {
+            let mut app = app();
+            add_unread_reply(&mut app);
+            app.notes.expanded_ids.push(1);
+            app.layout = None;
+            render::ensure_layout(&mut app, AREA);
+            let bounds = app.layout.as_ref().unwrap().latest_reply_bounds(1).unwrap();
+            app.main_pane.cursor_row = bounds.start;
+            app.sync_selection_to_cursor();
+            app.global.focus = FocusPane::Files;
+            let action = if command == '\n' {
+                handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            } else {
+                key(&mut app, command)
+            };
+            assert!(matches!(action, NavAction::RevealSelectedHunk));
+            assert!(
+                app.notes.items[0]
+                    .agent_thread()
+                    .unwrap()
+                    .has_unread_reply(),
+                "{command:?} has not visited the reply before its deferred reveal"
+            );
+            complete_navigation(&mut app, AREA, action);
+            assert_eq!(
+                app.global.focus,
+                if command == 'b' {
+                    FocusPane::Main
+                } else {
+                    FocusPane::Files
+                }
+            );
+            assert_ne!(app.current_note_id(), Some(1));
+            assert!(
+                app.notes.items[0]
+                    .agent_thread()
+                    .unwrap()
+                    .has_unread_reply(),
+                "{command:?} reveals a hunk header without visiting the reply"
+            );
+        }
     }
 }

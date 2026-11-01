@@ -64,6 +64,14 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         .as_ref()
         .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row));
 
+    let previous_reply_offset = app.layout.as_ref().and_then(|layout| {
+        let note_id = previous_cursor?.note_id?;
+        let bounds = layout.latest_reply_bounds(note_id)?;
+        bounds
+            .contains(&app.main_pane.cursor_row)
+            .then(|| (note_id, app.main_pane.cursor_row - bounds.start))
+    });
+
     let display = LayoutDisplayContext {
         file_states: &app.main_pane.file_states,
         notes: &app.notes.items,
@@ -86,9 +94,20 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
     if let Some(context) = previous_cursor
         && let Some(layout) = &app.layout
     {
-        if let Some(index) = row_index_for_context(layout, &app.session, context) {
+        let reply_row = previous_reply_offset.and_then(|(note_id, offset)| {
+            let bounds = layout.latest_reply_bounds(note_id)?;
+            Some(bounds.start + offset.min(bounds.len().saturating_sub(1)))
+        });
+        if let Some(index) =
+            reply_row.or_else(|| row_index_for_context(layout, &app.session, context))
+        {
             app.main_pane.cursor_row = index;
-            app.main_pane.scroll = index.saturating_sub(previous_visual_offset) as u16;
+            // Keep response text visible when a resize shortens the viewport.
+            app.main_pane.scroll = if needs_rebuild && reply_row.is_some() {
+                index as u16
+            } else {
+                index.saturating_sub(previous_visual_offset) as u16
+            };
         } else if let Some(range) = layout.hunk_ranges.iter().find(|range| {
             range.file_index == app.main_pane.selected_file
                 && range.hunk_index == app.main_pane.selected_hunk
@@ -161,6 +180,18 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
         row as u16
     };
     ensure_cursor_visible(app, area);
+}
+
+pub fn reveal_agent_reply(app: &mut App, area: Rect, note_id: u64) {
+    if let Some(bounds) = app
+        .layout
+        .as_ref()
+        .and_then(|layout| layout.latest_reply_bounds(note_id))
+    {
+        app.main_pane.cursor_row = bounds.start;
+        app.main_pane.scroll = bounds.start as u16;
+        ensure_cursor_visible(app, area);
+    }
 }
 
 pub fn ensure_cursor_visible(app: &mut App, area: Rect) {
@@ -486,50 +517,46 @@ fn fit_sidebar_width(area_width: u16, content_width: u16) -> u16 {
     desired.min(available)
 }
 
-fn sidebar_entry_label(app: &App, entry: &SidebarEntry, width: usize) -> String {
+fn sidebar_entry_line(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
+    let base_style = sidebar_entry_style(app, entry);
+    let unread = app.sidebar_entry_has_unread(entry);
     let SidebarEntryKind::File { file_index } = entry.kind else {
-        return truncate_middle(&entry.label, width);
+        if unread && width >= 2 {
+            return Line::from(vec![
+                Span::styled(truncate_middle(&entry.label, width - 2), base_style),
+                Span::styled(" ●", Style::default().fg(Color::Rgb(180, 120, 255))),
+            ]);
+        }
+        return Line::from(Span::styled(
+            truncate_middle(&entry.label, width),
+            base_style,
+        ));
     };
     let Some(file) = app.session.files.get(file_index) else {
-        return truncate_middle(&entry.label, width);
+        return Line::from(Span::styled(
+            truncate_middle(&entry.label, width),
+            base_style,
+        ));
     };
-
-    let status = match file.change_kind() {
-        FileChangeKind::Added => "A",
-        FileChangeKind::Deleted => "D",
-        FileChangeKind::Modified => "M",
+    let (marker, color) = if unread {
+        ("●", Color::Rgb(180, 120, 255))
+    } else {
+        match file.change_kind() {
+            FileChangeKind::Added => ("A", Color::Green),
+            FileChangeKind::Deleted => ("D", Color::Red),
+            FileChangeKind::Modified => ("M", Color::Yellow),
+        }
     };
     let file_name = file.path.rsplit('/').next().unwrap_or(file.path.as_str());
-    sidebar_file_label(entry.depth, file_name, status, width)
-}
-
-fn sidebar_entry_line(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
-    let label = sidebar_entry_label(app, entry, width);
-    let base_style = sidebar_entry_style(app, entry);
-    let SidebarEntryKind::File { file_index } = entry.kind else {
+    let label = sidebar_file_label(entry.depth, file_name, marker, width);
+    let marker_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let Some((leading, trailing)) = label.rsplit_once(marker) else {
         return Line::from(Span::styled(label, base_style));
     };
-    let Some(file) = app.session.files.get(file_index) else {
-        return Line::from(Span::styled(label, base_style));
-    };
-
-    let (status, color) = match file.change_kind() {
-        FileChangeKind::Added => ("A", Color::Green),
-        FileChangeKind::Deleted => ("D", Color::Red),
-        FileChangeKind::Modified => ("M", Color::Yellow),
-    };
-    let suffix = format!("{status}{}", " ".repeat(SIDEBAR_STATUS_RIGHT_PADDING));
-    let Some(leading) = label.strip_suffix(&suffix) else {
-        return Line::from(Span::styled(label, base_style));
-    };
-
     Line::from(vec![
         Span::styled(leading.to_string(), base_style),
-        Span::styled(
-            status.to_string(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ".repeat(SIDEBAR_STATUS_RIGHT_PADDING), base_style),
+        Span::styled(marker.to_string(), marker_style),
+        Span::styled(trailing.to_string(), base_style),
     ])
 }
 
@@ -791,6 +818,9 @@ fn row_index_for_context(
 ) -> Option<usize> {
     layout.row_index_for_context(session, target)
 }
+
+#[cfg(test)]
+mod sidebar_tests;
 
 #[cfg(test)]
 mod tests {
