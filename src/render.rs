@@ -270,8 +270,23 @@ fn render_sidebar_files(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let mut state = ListState::default().with_selected(Some(app.sidebar.cursor));
 
+    let title = Line::from(vec![
+        Span::raw(" Files "),
+        Span::styled(
+            format!("+{}", app.diff_stats.additions),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(", "),
+        Span::styled(
+            format!("-{}", app.diff_stats.deletions),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+    ]);
     let list = List::new(items)
-        .block(pane_block(" Files ", app.global.focus == FocusPane::Files))
+        .block(pane_block(title, app.global.focus == FocusPane::Files))
         .highlight_style(Style::default().bg(SIDEBAR_CURSOR_BACKGROUND));
 
     frame.render_stateful_widget(list, area, &mut state);
@@ -631,7 +646,7 @@ fn inner_pane_area(area: Rect) -> Rect {
     }
 }
 
-fn pane_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
+fn pane_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
     let style = if focused {
         Style::default()
             .fg(Color::White)
@@ -641,7 +656,8 @@ fn pane_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
     };
 
     Block::default()
-        .title(Span::styled(title, style))
+        .title(title)
+        .title_style(style)
         .borders(Borders::ALL)
         .border_style(style)
 }

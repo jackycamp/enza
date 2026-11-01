@@ -16,6 +16,9 @@ A fast and efficient terminal-based code diff viewer.
 # Install from source
 cargo install --git https://github.com/jackycamp/enza.git --root ~/.local
 
+# Add the install directory to your PATH
+export PATH="$HOME/.local/bin:$PATH"
+
 # Show help
 enza -h
 
@@ -30,14 +33,6 @@ enza
 ```
 
 ## Install
-
-### Install with script
-
-TODO
-
-### Install from releases
-
-TODO
 
 ### Install from source
 
@@ -55,11 +50,19 @@ cd enza
 cargo install --path . --root ~/.local
 ```
 
-Cargo installs the `enza` binary into Cargo's bin directory, usually `~/.cargo/bin`.
-If `enza` is not found after installing, add that directory to your shell `PATH`.
+These commands install `enza` into `~/.local/bin`.
+Add that directory to your shell `PATH`:
 
 ```sh
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add the same `export` line to your shell configuration, such as `~/.zshrc`, to keep it for future sessions.
+
+To reinstall after changing your local checkout, run this from the checkout:
+
+```sh
+cargo install --path . --root ~/.local
 ```
 
 Check the install:
@@ -113,10 +116,10 @@ cargo build --release
 ./target/release/enza
 ```
 
-Install it into Cargo's bin directory:
+Install it into `~/.local/bin`:
 
 ```sh
-cargo install --path .
+cargo install --path . --root ~/.local
 enza
 ```
 
@@ -151,10 +154,10 @@ cargo build --release
 ./target/release/enza
 ```
 
-Install it into Cargo's bin directory:
+Install it into `~/.local/bin`:
 
 ```sh
-cargo install --path .
+cargo install --path . --root ~/.local
 enza
 ```
 

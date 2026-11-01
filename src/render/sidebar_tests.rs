@@ -158,3 +158,110 @@ fn directory_unread_dots_remain_appended_and_clear_after_reading() {
         "▸ src"
     );
 }
+
+#[test]
+fn sidebar_totals_cover_all_loaded_files_and_ignore_collapse() {
+    use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+    use crate::state::{App, FocusPane};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        layout::Rect,
+        style::{Color, Modifier},
+    };
+
+    let mut app = App::new(DiffSession {
+        files: vec![
+            DiffFile {
+                path: "src/one.rs".into(),
+                old_path: "src/one.rs".into(),
+                new_path: "src/one.rs".into(),
+                hunks: vec![DiffHunk {
+                    header: "@@ first @@".into(),
+                    lines: vec![
+                        DiffLine::Added {
+                            new_lineno: 1,
+                            text: "new".into(),
+                        },
+                        DiffLine::Removed {
+                            old_lineno: 1,
+                            text: "old".into(),
+                        },
+                        DiffLine::Context {
+                            old_lineno: 2,
+                            new_lineno: 2,
+                            text: "same".into(),
+                        },
+                    ],
+                }],
+            },
+            DiffFile {
+                path: "src/two.rs".into(),
+                old_path: "/dev/null".into(),
+                new_path: "src/two.rs".into(),
+                hunks: vec![DiffHunk {
+                    header: "@@ second @@".into(),
+                    lines: vec![DiffLine::Added {
+                        new_lineno: 1,
+                        text: "another".into(),
+                    }],
+                }],
+            },
+        ],
+    });
+    app.global.focus = FocusPane::Files;
+    for collapsed in [false, true] {
+        if collapsed {
+            app.collapse_sidebar_directory();
+            app.main_pane.file_states[0].collapsed = true;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        terminal
+            .draw(|frame| super::render_sidebar_files(frame, Rect::new(0, 0, 30, 8), &app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let title: String = (0..30).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(title.contains(" Files +2, -1 "), "title: {title}");
+        for (x, expected_color) in [(8, Color::Green), (12, Color::Red)] {
+            let cell = &buffer[(x, 0)];
+            assert_eq!(cell.fg, expected_color);
+            assert!(cell.modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(app.sidebar.cursor, 0);
+    }
+    app.expand_sidebar_directory();
+    app.file_cursor_down();
+    app.activate_sidebar_cursor();
+    assert_eq!(app.main_pane.selected_file, 0);
+    assert_eq!(app.sidebar.cursor, 1);
+}
+
+#[test]
+fn sidebar_empty_totals_and_narrow_bounds() {
+    use crate::{diff::DiffSession, state::App};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    let app = App::new(DiffSession::default());
+    let mut terminal = Terminal::new(TestBackend::new(32, 8)).unwrap();
+    terminal
+        .draw(|frame| super::render_sidebar_files(frame, Rect::new(0, 0, 30, 8), &app))
+        .unwrap();
+    let title: String = (0..30)
+        .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+        .collect();
+    assert!(title.contains(" Files +0, -0 "), "title: {title}");
+    for width in 0..15 {
+        terminal
+            .draw(|frame| super::render_sidebar_files(frame, Rect::new(0, 0, width, 8), &app))
+            .unwrap();
+        for y in 0..8 {
+            for x in width..32 {
+                assert_eq!(
+                    terminal.backend().buffer()[(x, y)].symbol(),
+                    " ",
+                    "width {width}, cell {x},{y}"
+                );
+            }
+        }
+    }
+}
