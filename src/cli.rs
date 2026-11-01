@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 
-use crate::diff::{DiffFilter, DiffTarget};
+use crate::core::diff::{DiffFilter, DiffTarget};
 
 #[derive(Debug, Parser)]
 #[command(name = "enza", version, about = "Terminal diff viewer")]
@@ -112,7 +112,7 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command};
-    use crate::diff::DiffTarget;
+    use crate::core::diff::DiffTarget;
 
     #[test]
     fn bare_command_opens_landing_mode() {
