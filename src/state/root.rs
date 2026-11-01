@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use crate::agent::{
     AgentRuntime, MentionParseError, ParsedNoteInput, ReviewContext, parse_note_input,
 };
-use crate::diff::DiffSession;
 #[cfg(test)]
 use crate::diff::{DiffFile, DiffTarget};
+use crate::diff::{DiffSession, DiffStats};
 use crate::layout::{FileDisplayState, Layout, LayoutDisplayContext, LayoutWorker, RowContext};
 #[cfg(test)]
 use crate::note::AgentProvider;
@@ -26,6 +26,7 @@ use crate::state::{
 #[derive(Debug)]
 pub struct App {
     pub session: Arc<DiffSession>,
+    pub diff_stats: DiffStats,
     pub review: ReviewContext,
     pub layout: Option<Layout>,
     pub layout_worker: LayoutWorker,
@@ -49,9 +50,19 @@ impl App {
 
     pub fn new_with_review_context(session: DiffSession, review: ReviewContext) -> Self {
         let file_states = vec![FileDisplayState::default(); session.files.len()];
+        let mut diff_stats = DiffStats {
+            files: session.files.len(),
+            ..DiffStats::default()
+        };
+        for file in &session.files {
+            let (additions, deletions) = file.change_counts();
+            diff_stats.additions += additions;
+            diff_stats.deletions += deletions;
+        }
         let session = Arc::new(session);
         Self {
             session: Arc::clone(&session),
+            diff_stats,
             review,
             layout: None,
             layout_worker: LayoutWorker::new(session),
