@@ -8,8 +8,6 @@ A fast and efficient terminal-based code diff viewer.
 
 <img width="1906" height="1037" alt="image" src="https://github.com/user-attachments/assets/3e5e5de9-2ba5-4dbe-8888-f08fe45bc8a4" />
 
-
-
 ## Quick start
 
 ```bash
@@ -50,8 +48,7 @@ cd enza
 cargo install --path . --root ~/.local
 ```
 
-These commands install `enza` into `~/.local/bin`.
-Add that directory to your shell `PATH`:
+These commands install `enza` into `~/.local/bin`. Ensure that directory is added to your shell `PATH`:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -73,20 +70,21 @@ enza --version
 
 ## Features and Usage
 
-Press Ctrl+C on a file header or anywhere in its body to collapse the file.
-Press Ctrl+C on the collapsed header to reopen it. A green check mark identifies
-files you have viewed by collapsing them. The check mark remains after reopening
-until you exit the session.
+### Notes
 
-Unread agent replies replace the file's `A`, `M` or `D` status marker with a
-purple `●`. Reading the reply restores the status marker. Containing folders
-also show a purple `●` until their replies are read. Press `ga` for the next
-unread reply or `gA` for the previous unread reply.
-These commands wrap in diff order and work from either pane outside the note
-composer. A jump opens the file and thread and focuses the newest reply.
-Focusing the newest reply in an expanded thread also marks it read. Selecting
-the file or seeing a reply elsewhere in the pane does not mark it read.
-Unread markers last for the current session.
+You can leave a note anywhere in the diff by typing `n`, entering some text, and pressing enter. Press escape to exit note mode. By default, the note is associated with the line your cursor was at when you pressed `n`.
+
+You can also select sections of the diff by pressing `v` and then `n` to leave a note associated with your selection.
+
+### Message an agent
+
+To message an agent you can press `n` to enter note mode and then you can message your agent of choice by typing `@codex` or `@claude` with your question or request.
+
+When the agent has responded, you will see a purple `●` next to the file's name in the file explorer and in the file header of the diff. From here, you can press `ga` to go to the next unread agent reply or `gA` for the previous unread agent reply.
+
+### Collapse files
+
+Press ctrl+c on a file header or anywhere in its body to collapse the file, marking it as "viewed." You can expand the file by pressing ctrl+c on the collapsed file header. A green check mark will appear next to the file header indicating that you've marked it as read.
 
 ## Build and run on macOS
 
