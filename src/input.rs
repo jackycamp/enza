@@ -19,9 +19,9 @@ pub enum NavAction {
 impl NavAction {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
-            (_, Self::RevealAgentReply(id)) | (Self::RevealAgentReply(id), _) => {
-                Self::RevealAgentReply(id)
-            }
+            (_, Self::RevealAgentReply(id)) => Self::RevealAgentReply(id),
+            (Self::RevealAgentReply(id), Self::None) => Self::RevealAgentReply(id),
+            (Self::RevealAgentReply(_), later) => later,
             (_, Self::RevealSelectedHunk) | (Self::RevealSelectedHunk, _) => {
                 Self::RevealSelectedHunk
             }
@@ -99,10 +99,17 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
         return NavAction::None;
     }
     let action = handle_navigation_key(app, key);
-    if before != (app.main_pane.cursor_row, app.global.focus) || key.code == KeyCode::Enter {
+    let focus_moved = before != (app.main_pane.cursor_row, app.global.focus);
+    if focus_moved || key.code == KeyCode::Enter {
         app.acknowledge_focused_reply();
     }
-    action
+    // Opening a reply composer moves the cursor without requesting a reveal.
+    // Preserve that destination when an earlier event requested a reply jump.
+    if focus_moved && matches!(action, NavAction::None) {
+        NavAction::SyncSelectionToScroll
+    } else {
+        action
+    }
 }
 
 fn handle_navigation_key(app: &mut App, key: KeyEvent) -> NavAction {
@@ -721,5 +728,88 @@ mod tests {
                 .unwrap()
                 .has_unread_reply()
         );
+    }
+
+    fn apply_batch_action(app: &mut App, action: NavAction) {
+        render::ensure_layout(app, AREA);
+        match action {
+            NavAction::RevealSelectedHunk => render::reveal_selected_hunk(app, AREA),
+            NavAction::RevealAgentReply(id) => render::reveal_agent_reply(app, AREA, id),
+            NavAction::SyncSelectionToScroll => {
+                app.sync_selection_to_cursor();
+                render::ensure_cursor_visible(app, AREA);
+            }
+            NavAction::None => {}
+        }
+        app.sync_selection_to_cursor();
+        render::ensure_cursor_visible(app, AREA);
+    }
+
+    #[test]
+    fn later_cursor_movement_supersedes_a_reply_jump_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let expected = app.main_pane.cursor_row + 1;
+        let movement = key(&mut app, 'j');
+        apply_batch_action(&mut app, jump.merge(movement));
+        assert_eq!(app.main_pane.cursor_row, expected);
+    }
+
+    #[test]
+    fn later_hunk_movement_supersedes_a_reply_jump_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let movement = key(&mut app, ']');
+        apply_batch_action(&mut app, jump.merge(movement));
+        assert_eq!(
+            (app.main_pane.selected_file, app.main_pane.selected_hunk),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn final_reply_jump_supersedes_earlier_hunk_movement_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        let movement = key(&mut app, ']');
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        apply_batch_action(&mut app, movement.merge(jump));
+        assert_eq!(app.current_note_id(), Some(1));
+        let bounds = app.layout.as_ref().unwrap().latest_reply_bounds(1).unwrap();
+        assert_eq!(app.main_pane.cursor_row, bounds.start);
+    }
+
+    #[test]
+    fn later_composer_input_keeps_its_cursor_after_a_reply_jump() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let composer = key(&mut app, 'n');
+        let typing = key(&mut app, 'x');
+        let expected = app.reply_composer_bounds().unwrap().start;
+        apply_batch_action(&mut app, jump.merge(composer).merge(typing));
+        assert!(app.note_input_active());
+        assert_eq!(app.notes.composer.as_ref().unwrap().draft, "x");
+        assert_eq!(app.main_pane.cursor_row, expected);
+    }
+
+    #[test]
+    fn later_thread_collapse_supersedes_a_reply_jump_in_the_same_batch() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        let jump = key(&mut app, 'a');
+        let collapse =
+            handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let expected = app.main_pane.cursor_row;
+        apply_batch_action(&mut app, jump.merge(collapse));
+        assert!(!app.notes.expanded_ids.contains(&1));
+        assert_eq!(app.main_pane.cursor_row, expected);
     }
 }
