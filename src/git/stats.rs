@@ -5,9 +5,10 @@ use std::{
 
 use git2::{Diff as GitDiff, Repository};
 
+use crate::core::diff::{DiffStats, DiffStatsBreakdown, DiffTarget};
+
 use super::{
-    DiffStats, DiffStatsBreakdown, DiffTarget,
-    model::delta_filter_letter,
+    status::delta_filter_letter,
     target::ResolvedDiff,
     walk::{SyntheticRead, for_each_patch, read_synthetic_added_file},
 };
@@ -124,8 +125,7 @@ fn collect_diff_stats(
             }
 
             let status = delta_filter_letter(delta.status());
-            stats.all.add(file_stats);
-            stats.by_status.entry(status).or_default().add(file_stats);
+            stats.add(status, file_stats);
             true
         },
     );

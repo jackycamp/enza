@@ -12,7 +12,8 @@ use std::{
 use git2::{BranchType, Repository};
 
 use crate::{
-    diff::{DiffFilter, DiffSession, DiffStats, DiffStatsBreakdown, DiffStatsLoader, DiffTarget},
+    core::diff::{DiffFilter, DiffSession, DiffStats, DiffStatsBreakdown, DiffTarget},
+    git::DiffStatsLoader,
     log,
 };
 
@@ -157,7 +158,7 @@ fn load_full_diff(
 ) -> Option<LoadedDiff> {
     let mut diff_load = log::timer("diff_load");
     let session =
-        match DiffSession::load_from_repo_cancellable(repo_path, &target, diff_filter, || {
+        match crate::git::load_session_cancellable(repo_path, &target, diff_filter, || {
             cancelled.load(Ordering::Relaxed)
         }) {
             Ok(Some(session)) => session,
@@ -494,7 +495,7 @@ mod tests {
     };
 
     use super::{BackgroundWorker, LandingData, LandingSuggestion, LandingWorker};
-    use crate::diff::{DiffStats, DiffTarget};
+    use crate::core::diff::{DiffStats, DiffTarget};
 
     #[test]
     fn landing_worker_publishes_loaded_data() {

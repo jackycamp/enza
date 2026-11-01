@@ -6,7 +6,7 @@
 
 use ratatui::text::Line;
 
-use crate::diff::{DiffFile, DiffHunk, DiffSession};
+use crate::core::diff::{DiffFile, DiffHunk, DiffSession};
 use crate::highlight::FileHighlighter;
 use crate::layout::lines::{
     FileHeaderRenderer, FileHeaderSelection, InlineDiffLine, build_combined_side_line,

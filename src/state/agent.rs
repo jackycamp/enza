@@ -6,7 +6,7 @@
 //! state.
 
 use crate::agent::{AgentEvent, AgentRequest, build_agent_prompt};
-use crate::note::{
+use crate::core::note::{
     AGENT_ACTIVITY_INTERVAL, AgentFailure, AgentProvider, AgentRunState, Note, NoteId, NoteTarget,
     RunId,
 };
@@ -246,7 +246,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::DiffSession;
+    use crate::core::diff::DiffSession;
 
     #[test]
     fn completed_events_append_the_reply_and_session_id() {

@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+//! Diff data, targets, filters, and statistics without repository access.
 
-use git2::Delta;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DiffTarget {
@@ -31,8 +31,8 @@ pub struct DiffStats {
 /// `DiffFilter` can use these counts without another diff scan.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DiffStatsBreakdown {
-    pub(super) all: DiffStats,
-    pub(super) by_status: HashMap<char, DiffStats>,
+    all: DiffStats,
+    by_status: HashMap<char, DiffStats>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,11 +124,8 @@ impl DiffFilter {
         Some(Self { include, exclude })
     }
 
-    pub fn matches(&self, delta: Delta) -> bool {
-        self.matches_letter(delta_filter_letter(delta))
-    }
-
-    pub(super) fn matches_letter(&self, letter: char) -> bool {
+    /// Returns whether the filter accepts a Git status letter.
+    pub fn matches_letter(&self, letter: char) -> bool {
         if self.exclude.contains(&letter) {
             return false;
         }
@@ -189,6 +186,12 @@ impl DiffFile {
 }
 
 impl DiffStatsBreakdown {
+    /// Adds file counts to the total and to the given status.
+    pub(crate) fn add(&mut self, status: char, stats: DiffStats) {
+        self.all.add(stats);
+        self.by_status.entry(status).or_default().add(stats);
+    }
+
     /// If no filter exists, `stats` returns all counts.
     ///
     /// If a filter exists, `stats` returns counts for the Git statuses that the filter accepts.
@@ -212,20 +215,6 @@ impl DiffStats {
         self.files += other.files;
         self.additions += other.additions;
         self.deletions += other.deletions;
-    }
-}
-
-pub(super) fn delta_filter_letter(delta: Delta) -> char {
-    match delta {
-        Delta::Added | Delta::Untracked => 'A',
-        Delta::Copied => 'C',
-        Delta::Deleted => 'D',
-        Delta::Modified => 'M',
-        Delta::Renamed => 'R',
-        Delta::Typechange => 'T',
-        Delta::Conflicted => 'U',
-        Delta::Unreadable => 'X',
-        _ => 'B',
     }
 }
 

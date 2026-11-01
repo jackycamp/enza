@@ -1,12 +1,12 @@
 mod agent;
 mod cli;
-mod diff;
+mod core;
+mod git;
 mod highlight;
 mod input;
 mod landing;
 mod layout;
 mod log;
-mod note;
 mod render;
 mod state;
 
@@ -25,7 +25,8 @@ use ratatui::{Terminal, prelude::CrosstermBackend};
 use crate::{
     agent::ReviewContext,
     cli::{Cli, Command},
-    diff::{DiffFilter, DiffSession, DiffTarget, discover_repo_root},
+    core::diff::{DiffFilter, DiffSession, DiffTarget},
+    git::discover_repo_root,
     state::{App, FocusPane},
 };
 
@@ -77,8 +78,7 @@ fn run_app(
     diff_filter: Option<&DiffFilter>,
 ) -> io::Result<()> {
     let mut diff_load = log::timer("diff_load");
-    let session =
-        DiffSession::load_from_repo(repo_path, diff_target, diff_filter).unwrap_or_default();
+    let session = crate::git::load_session(repo_path, diff_target, diff_filter).unwrap_or_default();
 
     diff_load.field("files", session.num_files());
     diff_load.field("hunks", session.num_hunks());

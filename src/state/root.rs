@@ -12,12 +12,12 @@ use crate::agent::{
     AgentRuntime, MentionParseError, ParsedNoteInput, ReviewContext, parse_note_input,
 };
 #[cfg(test)]
-use crate::diff::{DiffFile, DiffTarget};
-use crate::diff::{DiffSession, DiffStats};
-use crate::layout::{FileDisplayState, Layout, LayoutDisplayContext, LayoutWorker, RowContext};
+use crate::core::diff::{DiffFile, DiffTarget};
+use crate::core::diff::{DiffSession, DiffStats};
 #[cfg(test)]
-use crate::note::AgentProvider;
-use crate::note::{Note, NoteTarget};
+use crate::core::note::AgentProvider;
+use crate::core::note::{Note, NoteTarget};
+use crate::layout::{FileDisplayState, Layout, LayoutDisplayContext, LayoutWorker, RowContext};
 use crate::state::{
     DiffMode, FocusPane, GlobalState, MainPaneState, NoteInputResult, NoteState, SidebarEntry,
     SidebarState, note_target_for_range, note_target_for_row,
@@ -534,7 +534,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{DiffHunk, DiffLine};
+    use crate::core::diff::{DiffHunk, DiffLine};
     use crate::layout::{HunkWindowTarget, LayoutBuildOptions, LayoutWidths, RowKind};
 
     fn app_with_hunks(count: usize) -> App {

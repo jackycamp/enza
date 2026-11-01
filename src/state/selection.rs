@@ -3,9 +3,9 @@
 //! Targets preserve file, hunk and old or new line coordinates from the diff.
 
 use crate::{
-    diff::DiffFile,
+    core::diff::DiffFile,
+    core::note::NoteTarget,
     layout::{RowContext, RowKind},
-    note::NoteTarget,
 };
 
 pub fn note_target_for_row(

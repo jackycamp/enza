@@ -255,7 +255,7 @@ fn try_extend_up(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
     use crate::layout::primitives::LayoutPlan;
 
     #[test]

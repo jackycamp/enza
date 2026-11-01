@@ -1,9 +1,9 @@
-use crate::note::NoteTarget;
+use crate::core::note::NoteTarget;
 
 #[test]
 fn unread_file_dot_replaces_status_without_changing_other_columns() {
-    use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession, FileChangeKind};
-    use crate::note::{AgentProvider, Note};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession, FileChangeKind};
+    use crate::core::note::{AgentProvider, Note};
     use crate::state::{App, SidebarEntry, SidebarEntryKind};
     use ratatui::style::Color;
 
@@ -111,8 +111,8 @@ fn unread_file_dot_replaces_status_without_changing_other_columns() {
 
 #[test]
 fn directory_unread_dots_remain_appended_and_clear_after_reading() {
-    use crate::diff::DiffSession;
-    use crate::note::{AgentProvider, Note};
+    use crate::core::diff::DiffSession;
+    use crate::core::note::{AgentProvider, Note};
     use crate::state::{App, SidebarEntry, SidebarEntryKind};
     use ratatui::style::Color;
     let mut app = App::new(DiffSession { files: vec![] });
@@ -161,7 +161,7 @@ fn directory_unread_dots_remain_appended_and_clear_after_reading() {
 
 #[test]
 fn sidebar_totals_cover_all_loaded_files_and_ignore_collapse() {
-    use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
     use crate::state::{App, FocusPane};
     use ratatui::{
         Terminal,
@@ -238,7 +238,7 @@ fn sidebar_totals_cover_all_loaded_files_and_ignore_collapse() {
 
 #[test]
 fn sidebar_empty_totals_and_narrow_bounds() {
-    use crate::{diff::DiffSession, state::App};
+    use crate::{core::diff::DiffSession, state::App};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     let app = App::new(DiffSession::default());

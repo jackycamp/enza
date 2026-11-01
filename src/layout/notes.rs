@@ -1,4 +1,5 @@
-use crate::diff::DiffSession;
+use crate::core::diff::DiffSession;
+use crate::core::note::{Note, NoteTarget};
 use crate::layout::LayoutDisplayContext;
 use crate::layout::base_layout::BaseLayout;
 use crate::layout::note::{
@@ -8,7 +9,6 @@ use crate::layout::plan::plan_row_contexts;
 use crate::layout::primitives::{
     HunkRange, LayoutWidths, NoteInsertion, RenderRow, RowContext, RowKind,
 };
-use crate::note::{Note, NoteTarget};
 
 pub(super) struct NoteOverlay {
     pub insertions: Vec<NoteInsertion>,
@@ -241,7 +241,7 @@ fn adjust_hunk_ranges_for_insertions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{DiffFile, DiffHunk, DiffLine};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine};
     use crate::layout::base_layout::BaseLayout;
     use crate::layout::layout_tree::LayoutTree;
     use crate::layout::primitives::{LayoutPlan, LayoutWidths};
@@ -306,7 +306,7 @@ mod tests {
             NoteTarget::File {
                 file_path: "test.rs".to_string(),
             },
-            crate::note::AgentProvider::Codex,
+            crate::core::note::AgentProvider::Codex,
             "Explain this".to_string(),
             1,
         );

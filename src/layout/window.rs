@@ -5,7 +5,7 @@
 //! Row numbers come from `LayoutPlan`; this module only decides which hunk
 //! render rows are currently kept in memory.
 
-use crate::diff::DiffSession;
+use crate::core::diff::DiffSession;
 use crate::layout::hunk_load_plan::HunkLoadPlan;
 use crate::layout::layout_tree::{CachedRows, HunkNode, LayoutTree, NodeStatus};
 use crate::layout::primitives::LayoutPlan;

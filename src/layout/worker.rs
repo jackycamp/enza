@@ -4,7 +4,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use crate::diff::DiffSession;
+use crate::core::diff::DiffSession;
 use crate::layout::layout_tree::HunkNode;
 use crate::layout::primitives::LayoutWidths;
 
@@ -188,7 +188,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::diff::{DiffFile, DiffHunk, DiffLine};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine};
 
     #[test]
     fn latest_window_replaces_older_pending_work() {

@@ -7,13 +7,13 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::diff::FileChangeKind;
+use crate::core::diff::FileChangeKind;
+use crate::core::note::NoteTarget;
 use crate::layout::{
     DiffSide, HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
     RowViewState, note_side, styled_mentions, width_for_side,
 };
 use crate::log;
-use crate::note::NoteTarget;
 use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
 const OVERSCAN_MULTIPLIER: usize = 2;
@@ -829,7 +829,7 @@ fn row_view_state(app: &App, cursor_focused: bool) -> RowViewState {
 
 fn row_index_for_context(
     layout: &DiffLayout,
-    session: &crate::diff::DiffSession,
+    session: &crate::core::diff::DiffSession,
     target: crate::layout::RowContext,
 ) -> Option<usize> {
     layout.row_index_for_context(session, target)
@@ -844,7 +844,7 @@ mod tests {
         composer_visible_text, composer_width, composer_x, fit_sidebar_width, sidebar_file_label,
         truncate_filename, truncate_middle,
     };
-    use crate::note::NoteTarget;
+    use crate::core::note::NoteTarget;
     use crate::state::DiffMode;
     use ratatui::layout::Rect;
 

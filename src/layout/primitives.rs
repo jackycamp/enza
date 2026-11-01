@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use ratatui::text::Line;
 
-use crate::note::{Note, NoteId};
+use crate::core::note::{Note, NoteId};
 
 #[derive(Clone, Debug)]
 pub struct HunkRange {

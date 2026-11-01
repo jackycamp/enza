@@ -20,7 +20,7 @@ use super::loader::{
     DiffLoadWorker, LandingData, LandingSuggestion, LandingWorker, LoadedDiff,
     loading_worktree_suggestion,
 };
-use crate::diff::{DiffFilter, DiffStats, DiffTarget};
+use crate::core::diff::{DiffFilter, DiffStats, DiffTarget};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const BASELINE_PARTICLE_COUNT: usize = 32;
@@ -632,7 +632,7 @@ mod tests {
         BASELINE_PARTICLE_COUNT, LandingApp, LandingData, LandingSuggestion, MAX_PARTICLE_COUNT,
         OpeningAction, handle_opening_event, particle_count, render,
     };
-    use crate::diff::{DiffStats, DiffTarget};
+    use crate::core::diff::{DiffStats, DiffTarget};
 
     #[test]
     fn landing_starts_with_an_openable_worktree_while_loading() {

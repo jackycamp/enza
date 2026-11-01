@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use git2::{Diff as GitDiff, DiffOptions, Oid, Repository, Tree};
 
-use super::DiffTarget;
+use crate::core::diff::DiffTarget;
 
 /// `ResolvedDiff` stores the resolved object IDs and comparison type for a diff target.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

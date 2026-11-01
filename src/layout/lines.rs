@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::diff::{DiffFile, DiffLine};
+use crate::core::diff::{DiffFile, DiffLine};
 use crate::highlight::{DiffKind, FileHighlighter};
 use crate::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
 
@@ -476,7 +476,7 @@ mod tests {
         SELECTED_FILE_HEADER_BACKGROUND, SIDE_BY_SIDE_CODE_INDENT, display_hunk_header,
         hunk_header_line, side_by_side_hunk_header_line,
     };
-    use crate::diff::{DiffFile, DiffHunk, DiffLine};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine};
     use ratatui::text::Line;
 
     #[test]

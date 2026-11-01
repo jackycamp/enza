@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 
-use crate::diff::{DiffFile, DiffLine, DiffSession, DiffTarget};
-use crate::note::NoteTarget;
+use crate::core::diff::{DiffFile, DiffLine, DiffSession, DiffTarget};
+use crate::core::note::NoteTarget;
 
 const MAX_CONTEXT_LINES: usize = 160;
 const MAX_CONTEXT_BYTES: usize = 24 * 1024;
@@ -231,7 +231,7 @@ fn append_context_line(output: &mut String, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{DiffHunk, DiffLine};
+    use crate::core::diff::{DiffHunk, DiffLine};
 
     #[test]
     fn line_prompts_include_the_containing_hunk_and_review_instruction() {

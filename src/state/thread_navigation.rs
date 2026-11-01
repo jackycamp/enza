@@ -1,7 +1,7 @@
 //! Unread agent replies and deliberate navigation to their latest response.
 
+use crate::core::note::Note;
 use crate::layout::{Layout, LayoutDisplayContext};
-use crate::note::Note;
 
 use super::{App, FocusPane, SidebarEntry, SidebarEntryKind};
 
@@ -160,9 +160,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+    use crate::core::note::{AgentProvider, NoteTarget};
     use crate::layout::RowContext;
-    use crate::note::{AgentProvider, NoteTarget};
     use crate::{
         input::{self, NavAction},
         render,

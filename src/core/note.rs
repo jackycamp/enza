@@ -1,3 +1,5 @@
+//! Review notes and agent thread lifecycle data.
+
 use std::time::{Duration, Instant};
 
 pub const AGENT_ACTIVITY_INTERVAL: Duration = Duration::from_millis(400);

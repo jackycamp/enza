@@ -335,9 +335,9 @@ fn handle_note_input_key_event(app: &mut App, key: KeyEvent) -> NavAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+    use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+    use crate::core::note::NoteTarget;
     use crate::layout::{RowContext, RowKind, RowViewState};
-    use crate::note::NoteTarget;
     use ratatui::layout::Rect;
 
     const AREA: Rect = Rect::new(0, 0, 120, 30);
@@ -639,12 +639,12 @@ mod tests {
     }
 
     fn add_unread_reply(app: &mut App) {
-        let mut note = crate::note::Note::new_agent(
+        let mut note = crate::core::note::Note::new_agent(
             1,
             NoteTarget::File {
                 file_path: "file2.rs".into(),
             },
-            crate::note::AgentProvider::Codex,
+            crate::core::note::AgentProvider::Codex,
             "prompt".into(),
             1,
         );

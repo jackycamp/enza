@@ -1,4 +1,4 @@
-use crate::diff::DiffSession;
+use crate::core::diff::DiffSession;
 use crate::layout::layout_tree::LayoutTree;
 use crate::layout::primitives::{HunkRange, LayoutPlan};
 use crate::layout::window::{LayoutBuildOptions, apply_loaded_hunk_window_sync};

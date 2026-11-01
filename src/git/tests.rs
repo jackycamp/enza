@@ -9,6 +9,7 @@ use std::{
 use git2::{IndexAddOption, Oid, Repository, Signature, build::CheckoutBuilder};
 
 use super::*;
+use crate::core::diff::*;
 
 static NEXT_TEST_REPO: AtomicU64 = AtomicU64::new(0);
 
@@ -111,12 +112,12 @@ fn assert_target_stats_match(fixture: &TestRepo, target: &DiffTarget) -> DiffSta
     let stats = load_stats(&mut loader, target).expect("load diff stats");
 
     let full_session =
-        DiffSession::load_from_repo(fixture.path(), target, None).expect("load full diff");
+        crate::git::load_session(fixture.path(), target, None).expect("load full diff");
     assert_eq!(stats.stats(None), stats_for_session(&full_session));
 
     for value in ["M", "A", "D", "AD", "m", "a", "d"] {
         let filter = DiffFilter::parse(value).expect("parse test filter");
-        let filtered_session = DiffSession::load_from_repo(fixture.path(), target, Some(&filter))
+        let filtered_session = crate::git::load_session(fixture.path(), target, Some(&filter))
             .expect("load filtered diff");
         assert_eq!(
             stats.stats(Some(&filter)),
@@ -291,7 +292,7 @@ fn untracked_fallback_preserves_line_content() {
     fs::write(fixture.path().join("line-endings.txt"), "first\r\nsecond\r")
         .expect("write line-ending fixture");
 
-    let session = DiffSession::load_from_repo(fixture.path(), &DiffTarget::Worktree, None)
+    let session = crate::git::load_session(fixture.path(), &DiffTarget::Worktree, None)
         .expect("load untracked fallback");
     let texts = session.files[0].hunks[0]
         .lines
@@ -322,7 +323,7 @@ fn invalid_revision_errors_match() {
         head: "HEAD".to_string(),
     };
 
-    let session_error = DiffSession::load_from_repo(fixture.path(), &target, None)
+    let session_error = crate::git::load_session(fixture.path(), &target, None)
         .expect_err("full diff should reject an invalid revision");
     let repo = fixture.open();
     let mut loader = DiffStatsLoader::new(&repo);
@@ -342,22 +343,18 @@ fn cancelled_session_load_discards_the_partial_model() {
         .expect("write cancellation fixture");
 
     let checks = Cell::new(0);
-    let cancelled = DiffSession::load_from_repo_cancellable(
-        fixture.path(),
-        &DiffTarget::Worktree,
-        None,
-        || {
+    let cancelled =
+        crate::git::load_session_cancellable(fixture.path(), &DiffTarget::Worktree, None, || {
             let next = checks.get() + 1;
             checks.set(next);
             next >= 9
-        },
-    )
-    .expect("cancel session load");
+        })
+        .expect("cancel session load");
 
     assert!(cancelled.is_none());
     assert!(checks.get() >= 9);
 
-    let completed = DiffSession::load_from_repo(fixture.path(), &DiffTarget::Worktree, None)
+    let completed = crate::git::load_session(fixture.path(), &DiffTarget::Worktree, None)
         .expect("retry cancelled session load");
     assert_eq!(completed.files.len(), 2);
 }

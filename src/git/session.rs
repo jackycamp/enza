@@ -2,60 +2,60 @@ use std::path::Path;
 
 use git2::{Diff as GitDiff, DiffDelta, Patch, Repository};
 
+use crate::core::diff::{DiffFile, DiffFilter, DiffHunk, DiffLine, DiffSession, DiffTarget};
+
 use super::{
-    DiffFile, DiffFilter, DiffHunk, DiffLine, DiffSession, DiffTarget,
+    status::delta_filter_letter,
     target::ResolvedDiff,
     walk::{SyntheticRead, for_each_patch, read_synthetic_added_file},
 };
 
-impl DiffSession {
-    pub fn load_from_repo(
-        path: impl AsRef<Path>,
-        target: &DiffTarget,
-        diff_filter: Option<&DiffFilter>,
-    ) -> Result<Self, git2::Error> {
-        Self::load_from_repo_cancellable(path, target, diff_filter, || false).map(|session| {
-            session.expect("a session load with a false cancellation callback must complete")
-        })
-    }
+pub fn load_session(
+    path: impl AsRef<Path>,
+    target: &DiffTarget,
+    diff_filter: Option<&DiffFilter>,
+) -> Result<DiffSession, git2::Error> {
+    load_session_cancellable(path, target, diff_filter, || false).map(|session| {
+        session.expect("a session load with a false cancellation callback must complete")
+    })
+}
 
-    /// If the caller cancels the load, `load_from_repo_cancellable` returns `None`.
-    ///
-    /// `load_from_repo_cancellable` discards an incomplete session.
-    pub fn load_from_repo_cancellable(
-        path: impl AsRef<Path>,
-        target: &DiffTarget,
-        diff_filter: Option<&DiffFilter>,
-        mut is_cancelled: impl FnMut() -> bool,
-    ) -> Result<Option<Self>, git2::Error> {
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let repo = Repository::discover(path)?;
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let workdir = repo.workdir().map(Path::to_path_buf);
-        let resolved = ResolvedDiff::resolve(&repo, target)?;
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let diff = resolved.load(&repo)?;
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let Some(files) = collect_diff_files(
-            &diff,
-            workdir.as_deref(),
-            resolved.allows_worktree_fallback(),
-            diff_filter,
-            &mut is_cancelled,
-        ) else {
-            return Ok(None);
-        };
-
-        Ok(Some(Self { files }))
+/// If the caller cancels the load, `load_session_cancellable` returns `None`.
+///
+/// `load_session_cancellable` discards an incomplete session.
+pub fn load_session_cancellable(
+    path: impl AsRef<Path>,
+    target: &DiffTarget,
+    diff_filter: Option<&DiffFilter>,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<Option<DiffSession>, git2::Error> {
+    if is_cancelled() {
+        return Ok(None);
     }
+    let repo = Repository::discover(path)?;
+    if is_cancelled() {
+        return Ok(None);
+    }
+    let workdir = repo.workdir().map(Path::to_path_buf);
+    let resolved = ResolvedDiff::resolve(&repo, target)?;
+    if is_cancelled() {
+        return Ok(None);
+    }
+    let diff = resolved.load(&repo)?;
+    if is_cancelled() {
+        return Ok(None);
+    }
+    let Some(files) = collect_diff_files(
+        &diff,
+        workdir.as_deref(),
+        resolved.allows_worktree_fallback(),
+        diff_filter,
+        &mut is_cancelled,
+    ) else {
+        return Ok(None);
+    };
+
+    Ok(Some(DiffSession { files }))
 }
 
 fn collect_diff_files(
@@ -68,7 +68,9 @@ fn collect_diff_files(
     let mut files = Vec::new();
     let complete = for_each_patch(
         diff,
-        |status| diff_filter.is_none_or(|filter| filter.matches(status)),
+        |status| {
+            diff_filter.is_none_or(|filter| filter.matches_letter(delta_filter_letter(status)))
+        },
         is_cancelled,
         |delta, patch, is_cancelled| {
             let Some(file) =

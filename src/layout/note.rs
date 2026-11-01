@@ -6,12 +6,12 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::layout::lines::{combined_side_line, split_side_by_side_width};
-use crate::layout::text::{truncate_with_ellipsis, wrap_text};
-use crate::note::{
+use crate::core::note::{
     AGENT_ACTIVITY_INTERVAL, AgentFailureKind, AgentProvider, AgentRunState, AgentThread,
     MessageAuthor, Note, NoteTarget,
 };
+use crate::layout::lines::{combined_side_line, split_side_by_side_width};
+use crate::layout::text::{truncate_with_ellipsis, wrap_text};
 
 pub(crate) const NOTE_COMPOSER_HEIGHT: usize = 3;
 
@@ -677,7 +677,7 @@ fn is_mention_boundary(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::note::AgentFailure;
+    use crate::core::note::AgentFailure;
 
     fn file_target() -> NoteTarget {
         NoteTarget::File {

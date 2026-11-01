@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
+use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
 use crate::layout::plan::plan_row_contexts;
 use crate::layout::{
     HunkWindowTarget, Layout, LayoutBuildOptions, LayoutWidths, LayoutWorker, RowKind,
@@ -197,9 +197,9 @@ fn hunk_starts(layout: &Layout) -> Vec<(usize, usize, usize)> {
 fn collapsed_files_stay_hidden_when_worker_results_arrive() {
     let session = session_with_hunks(4);
     let worker = LayoutWorker::new(Arc::new(session.clone()));
-    let notes = [crate::note::Note::new(
+    let notes = [crate::core::note::Note::new(
         1,
-        crate::note::NoteTarget::File {
+        crate::core::note::NoteTarget::File {
             file_path: "test.rs".into(),
         },
         "keep this note hidden".into(),

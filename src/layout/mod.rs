@@ -14,7 +14,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::diff::DiffSession;
+use crate::core::diff::DiffSession;
 use crate::layout::base_layout::BaseLayout;
 use crate::layout::layout_tree::HunkNode;
 use crate::layout::notes::{NoteOverlay, NoteOverlayRequest};
@@ -437,7 +437,7 @@ impl Layout {
     /// Resolves note targets in diff order, including collapsed and unloaded hunks.
     pub fn note_targets(
         session: &DiffSession,
-        notes: &[crate::note::Note],
+        notes: &[crate::core::note::Note],
     ) -> Vec<(usize, RowContext)> {
         let plan = LayoutPlan::new(session, &[]);
         let contexts = plan::plan_row_contexts(session, &plan);

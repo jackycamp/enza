@@ -3,7 +3,7 @@
 //! This state allocates note and agent-run IDs, controls expansion, and applies
 //! create, edit and reply composer rules.
 
-use crate::note::{Note, NoteId, RunId};
+use crate::core::note::{Note, NoteId, RunId};
 
 pub enum NoteInputResult {
     Create { body: String },
@@ -169,7 +169,7 @@ impl NoteState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::note::{AgentProvider, NoteTarget};
+    use crate::core::note::{AgentProvider, NoteTarget};
 
     fn target() -> NoteTarget {
         NoteTarget::File {

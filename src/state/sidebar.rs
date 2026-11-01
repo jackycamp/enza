@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::diff::{DiffFile, FileChangeKind};
+use crate::core::diff::{DiffFile, FileChangeKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SidebarEntryKind {
