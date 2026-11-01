@@ -26,7 +26,6 @@ use crate::{
     agent::ReviewContext,
     cli::{Cli, Command},
     diff::{DiffFilter, DiffSession, DiffTarget, discover_repo_root},
-    input::NavAction,
     state::{App, FocusPane},
 };
 
@@ -138,34 +137,7 @@ fn run_loaded_app(
 
         if let Some(action) = input::poll_and_handle_events(&mut app)? {
             let viewport_area = terminal.get_frame().area();
-            render::ensure_layout(&mut app, viewport_area);
-
-            app.clamp_cursor_row(render::max_cursor_row(&app));
-            app.main_pane.scroll = app
-                .main_pane
-                .scroll
-                .min(render::max_scroll(&app, viewport_area));
-
-            match action {
-                NavAction::RevealSelectedHunk => {
-                    render::reveal_selected_hunk(&mut app, viewport_area)
-                }
-                NavAction::RevealAgentReply(note_id) => {
-                    render::reveal_agent_reply(&mut app, viewport_area, note_id);
-                }
-                NavAction::SyncSelectionToScroll => {
-                    app.sync_selection_to_cursor();
-                    render::ensure_cursor_visible(&mut app, viewport_area);
-                }
-                NavAction::None => {}
-            }
-
-            app.sync_selection_to_cursor();
-            render::ensure_cursor_visible(&mut app, viewport_area);
-
-            if app.global.focus != FocusPane::Files {
-                app.sync_sidebar_cursor_to_selected_file();
-            }
+            input::complete_navigation(&mut app, viewport_area, action);
         }
     }
 

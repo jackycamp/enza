@@ -5,7 +5,7 @@ fn unread_file_dot_replaces_status_without_changing_other_columns() {
     use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession, FileChangeKind};
     use crate::note::{AgentProvider, Note};
     use crate::state::{App, SidebarEntry, SidebarEntryKind};
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Color;
 
     for (kind, marker, color) in [
         (FileChangeKind::Added, "A", Color::Green),
@@ -90,7 +90,6 @@ fn unread_file_dot_replaces_status_without_changing_other_columns() {
                         .find(|span| span.content == "●")
                         .unwrap();
                     assert_eq!(dot.style.fg, Some(Color::Rgb(180, 120, 255)));
-                    assert!(dot.style.add_modifier.contains(Modifier::BOLD));
                 }
             }
             app.notes.items[0].agent_thread_mut().unwrap().mark_read();

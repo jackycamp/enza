@@ -33,6 +33,36 @@ impl NavAction {
     }
 }
 
+/// Applies pending navigation and keeps the cursor, viewport and sidebar aligned.
+pub fn complete_navigation(app: &mut App, viewport_area: ratatui::layout::Rect, action: NavAction) {
+    render::ensure_layout(app, viewport_area);
+
+    app.clamp_cursor_row(render::max_cursor_row(app));
+    app.main_pane.scroll = app
+        .main_pane
+        .scroll
+        .min(render::max_scroll(app, viewport_area));
+
+    match action {
+        NavAction::RevealSelectedHunk => render::reveal_selected_hunk(app, viewport_area),
+        NavAction::RevealAgentReply(note_id) => {
+            render::reveal_agent_reply(app, viewport_area, note_id);
+        }
+        NavAction::SyncSelectionToScroll => {
+            app.sync_selection_to_cursor();
+            render::ensure_cursor_visible(app, viewport_area);
+        }
+        NavAction::None => {}
+    }
+
+    app.sync_selection_to_cursor();
+    render::ensure_cursor_visible(app, viewport_area);
+
+    if app.global.focus != FocusPane::Files {
+        app.sync_sidebar_cursor_to_selected_file();
+    }
+}
+
 pub fn poll_and_handle_events(app: &mut App) -> io::Result<Option<NavAction>> {
     if !event::poll(Duration::from_millis(16))? {
         return Ok(None);
@@ -733,21 +763,6 @@ mod tests {
         );
     }
 
-    fn apply_batch_action(app: &mut App, action: NavAction) {
-        render::ensure_layout(app, AREA);
-        match action {
-            NavAction::RevealSelectedHunk => render::reveal_selected_hunk(app, AREA),
-            NavAction::RevealAgentReply(id) => render::reveal_agent_reply(app, AREA, id),
-            NavAction::SyncSelectionToScroll => {
-                app.sync_selection_to_cursor();
-                render::ensure_cursor_visible(app, AREA);
-            }
-            NavAction::None => {}
-        }
-        app.sync_selection_to_cursor();
-        render::ensure_cursor_visible(app, AREA);
-    }
-
     #[test]
     fn later_cursor_movement_supersedes_a_reply_jump_in_the_same_batch() {
         let mut app = app();
@@ -756,7 +771,7 @@ mod tests {
         let jump = key(&mut app, 'a');
         let expected = app.main_pane.cursor_row + 1;
         let movement = key(&mut app, 'j');
-        apply_batch_action(&mut app, jump.merge(movement));
+        complete_navigation(&mut app, AREA, jump.merge(movement));
         assert_eq!(app.main_pane.cursor_row, expected);
     }
 
@@ -767,7 +782,7 @@ mod tests {
         key(&mut app, 'g');
         let jump = key(&mut app, 'a');
         let movement = key(&mut app, ']');
-        apply_batch_action(&mut app, jump.merge(movement));
+        complete_navigation(&mut app, AREA, jump.merge(movement));
         assert_eq!(
             (app.main_pane.selected_file, app.main_pane.selected_hunk),
             (2, 1)
@@ -781,7 +796,7 @@ mod tests {
         let movement = key(&mut app, ']');
         key(&mut app, 'g');
         let jump = key(&mut app, 'a');
-        apply_batch_action(&mut app, movement.merge(jump));
+        complete_navigation(&mut app, AREA, movement.merge(jump));
         assert_eq!(app.current_note_id(), Some(1));
         let bounds = app.layout.as_ref().unwrap().latest_reply_bounds(1).unwrap();
         assert_eq!(app.main_pane.cursor_row, bounds.start);
@@ -796,7 +811,7 @@ mod tests {
         let composer = key(&mut app, 'n');
         let typing = key(&mut app, 'x');
         let expected = app.reply_composer_bounds().unwrap().start;
-        apply_batch_action(&mut app, jump.merge(composer).merge(typing));
+        complete_navigation(&mut app, AREA, jump.merge(composer).merge(typing));
         assert!(app.note_input_active());
         assert_eq!(app.notes.composer.as_ref().unwrap().draft, "x");
         assert_eq!(app.main_pane.cursor_row, expected);
@@ -811,7 +826,7 @@ mod tests {
         let collapse =
             handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let expected = app.main_pane.cursor_row;
-        apply_batch_action(&mut app, jump.merge(collapse));
+        complete_navigation(&mut app, AREA, jump.merge(collapse));
         assert!(!app.notes.expanded_ids.contains(&1));
         assert_eq!(app.main_pane.cursor_row, expected);
     }
@@ -841,7 +856,7 @@ mod tests {
                     .has_unread_reply(),
                 "{command:?} has not visited the reply before its deferred reveal"
             );
-            apply_batch_action(&mut app, action);
+            complete_navigation(&mut app, AREA, action);
             assert_eq!(
                 app.global.focus,
                 if command == 'b' {

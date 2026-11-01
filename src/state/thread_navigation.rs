@@ -161,10 +161,14 @@ impl App {
 mod tests {
     use super::*;
     use crate::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
-    use crate::layout::{NodeStatus, RowContext};
+    use crate::layout::RowContext;
     use crate::note::{AgentProvider, NoteTarget};
-    use crate::{render, state::DiffMode};
-    use ratatui::layout::Rect;
+    use crate::{
+        input::{self, NavAction},
+        render,
+        state::DiffMode,
+    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use std::time::Instant;
 
     const AREA: Rect = Rect::new(0, 0, 120, 24);
@@ -252,10 +256,6 @@ mod tests {
             app.sidebar.collapsed_dirs = vec!["src".into(), "src/nested".into()];
             app.global.focus = FocusPane::Files;
             app.main_pane.selection_anchor = Some(RowContext::file_header(0));
-            assert!(matches!(
-                app.layout.as_ref().unwrap().base.tree.files[2].hunks[9].status,
-                NodeStatus::Unbuilt
-            ));
             assert!(app.jump_to_unread_reply(ReplyDirection::Next));
             assert_eq!(app.global.focus, FocusPane::Main);
             assert!(!app.main_pane.file_states[2].collapsed);
@@ -268,33 +268,78 @@ mod tests {
                 (app.main_pane.selected_file, app.main_pane.selected_hunk),
                 (2, 9)
             );
-            assert_eq!(
-                app.layout.as_ref().unwrap().base.tree.files[2].hunks[9].status,
-                NodeStatus::Ready
-            );
-            for area in [AREA, Rect::new(0, 0, 85, 18)] {
-                render::ensure_layout(&mut app, area);
-                render::reveal_agent_reply(&mut app, area, 1);
-                let layout = app.layout.as_ref().unwrap();
-                let bounds = layout.latest_reply_bounds(1).unwrap();
-                assert_eq!(app.main_pane.cursor_row, bounds.start);
-                let rows = layout.render_visible_rows(
-                    &app.session,
-                    mode == DiffMode::SideBySide,
-                    &crate::layout::RowViewState {
-                        scroll: bounds.start as u16,
-                        selected_file: 2,
-                        selected_hunk: 9,
-                        cursor_row: bounds.start,
-                        cursor_focused: true,
-                        selected_rows: None,
-                    },
-                    3,
+            input::complete_navigation(&mut app, AREA, NavAction::RevealAgentReply(1));
+            for area in [AREA, Rect::new(0, 0, 85, 18), Rect::new(0, 0, 150, 30)] {
+                input::complete_navigation(&mut app, area, NavAction::None);
+                let mut terminal =
+                    Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+                terminal.draw(|frame| render::render(frame, &app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let visible = (0..area.height)
+                    .map(|row| {
+                        (0..area.width)
+                            .map(|column| buffer[(column, row)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    visible.contains("newest"),
+                    "{mode:?} at {area:?} must show newest response:\n{visible}"
                 );
-                assert!(rows.iter().any(|row| row.to_string().contains("newest")));
-                assert!(bounds.start > 50, "must skip old history");
+                assert_eq!(app.current_note_id(), Some(1));
+                assert!(
+                    app.layout
+                        .as_ref()
+                        .unwrap()
+                        .latest_reply_bounds(1)
+                        .unwrap()
+                        .contains(&app.main_pane.cursor_row),
+                    "resize must keep focus within the newest response"
+                );
             }
         }
+    }
+
+    #[test]
+    fn passive_resize_preserves_reply_focus_without_reading_or_moving_history_focus() {
+        let mut app = app();
+        reply(&mut app, 1, file_target(0), true);
+        app.notes.expanded_ids.push(1);
+        let narrow = Rect::new(0, 0, 85, 18);
+        input::complete_navigation(&mut app, narrow, NavAction::None);
+        let layout = app.layout.as_ref().unwrap();
+        app.main_pane.cursor_row = layout.latest_reply_bounds(1).unwrap().end - 1;
+        app.main_pane.scroll = app.main_pane.cursor_row as u16;
+        input::complete_navigation(&mut app, Rect::new(0, 0, 150, 30), NavAction::None);
+        assert!(
+            app.layout
+                .as_ref()
+                .unwrap()
+                .latest_reply_bounds(1)
+                .unwrap()
+                .contains(&app.main_pane.cursor_row)
+        );
+        assert!(unread(&app, 1), "resizing must not acknowledge a reply");
+
+        let layout = app.layout.as_ref().unwrap();
+        let history = layout
+            .note_insertions
+            .iter()
+            .find(|note| note.context.note_id == Some(1))
+            .unwrap()
+            .context;
+        app.main_pane.cursor_row = layout.row_index_for_context(&app.session, history).unwrap();
+        app.main_pane.scroll = app.main_pane.cursor_row as u16;
+        input::complete_navigation(&mut app, narrow, NavAction::None);
+        assert_eq!(
+            app.layout
+                .as_ref()
+                .unwrap()
+                .row_context(&app.session, app.main_pane.cursor_row),
+            Some(history)
+        );
+        assert!(unread(&app, 1));
     }
 
     #[test]

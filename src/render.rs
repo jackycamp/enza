@@ -64,6 +64,14 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
         .as_ref()
         .and_then(|layout| layout.row_context(&app.session, app.main_pane.cursor_row));
 
+    let previous_reply_offset = app.layout.as_ref().and_then(|layout| {
+        let note_id = previous_cursor?.note_id?;
+        let bounds = layout.latest_reply_bounds(note_id)?;
+        bounds
+            .contains(&app.main_pane.cursor_row)
+            .then(|| (note_id, app.main_pane.cursor_row - bounds.start))
+    });
+
     let display = LayoutDisplayContext {
         file_states: &app.main_pane.file_states,
         notes: &app.notes.items,
@@ -86,9 +94,20 @@ pub fn ensure_layout(app: &mut App, area: Rect) {
     if let Some(context) = previous_cursor
         && let Some(layout) = &app.layout
     {
-        if let Some(index) = row_index_for_context(layout, &app.session, context) {
+        let reply_row = previous_reply_offset.and_then(|(note_id, offset)| {
+            let bounds = layout.latest_reply_bounds(note_id)?;
+            Some(bounds.start + offset.min(bounds.len().saturating_sub(1)))
+        });
+        if let Some(index) =
+            reply_row.or_else(|| row_index_for_context(layout, &app.session, context))
+        {
             app.main_pane.cursor_row = index;
-            app.main_pane.scroll = index.saturating_sub(previous_visual_offset) as u16;
+            // Keep response text visible when a resize shortens the viewport.
+            app.main_pane.scroll = if needs_rebuild && reply_row.is_some() {
+                index as u16
+            } else {
+                index.saturating_sub(previous_visual_offset) as u16
+            };
         } else if let Some(range) = layout.hunk_ranges.iter().find(|range| {
             range.file_index == app.main_pane.selected_file
                 && range.hunk_index == app.main_pane.selected_hunk
