@@ -6,18 +6,22 @@ use crossterm::event::{
 
 use crate::{
     render,
-    state::{App, FocusPane},
+    state::{App, FocusPane, ReplyDirection},
 };
 
 pub enum NavAction {
     None,
     RevealSelectedHunk,
+    RevealAgentReply(u64),
     SyncSelectionToScroll,
 }
 
 impl NavAction {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
+            (_, Self::RevealAgentReply(id)) | (Self::RevealAgentReply(id), _) => {
+                Self::RevealAgentReply(id)
+            }
             (_, Self::RevealSelectedHunk) | (Self::RevealSelectedHunk, _) => {
                 Self::RevealSelectedHunk
             }
@@ -50,12 +54,58 @@ fn handle_event(app: &mut App, event: Event) -> NavAction {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             handle_key_event(app, key)
         }
-        Event::Mouse(mouse) => handle_mouse_event(app, mouse),
+        Event::Mouse(mouse) => {
+            app.thread_prefix_pending = false;
+            let before = app.main_pane.cursor_row;
+            let action = handle_mouse_event(app, mouse);
+            if before != app.main_pane.cursor_row {
+                app.acknowledge_focused_reply();
+            }
+            action
+        }
+        Event::Resize(_, _) | Event::FocusLost => {
+            app.thread_prefix_pending = false;
+            NavAction::None
+        }
         _ => NavAction::None,
     }
 }
 
 fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
+    let before = (app.main_pane.cursor_row, app.global.focus);
+    if app.note_input_active() {
+        app.thread_prefix_pending = false;
+        return handle_note_input_key_event(app, key);
+    }
+    if std::mem::take(&mut app.thread_prefix_pending)
+        && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('a' | 'A'))
+    {
+        return if app.jump_to_unread_reply(if key.code == KeyCode::Char('a') {
+            ReplyDirection::Next
+        } else {
+            ReplyDirection::Previous
+        }) {
+            NavAction::RevealAgentReply(
+                app.current_note_id()
+                    .expect("successful reply jump selects a note"),
+            )
+        } else {
+            NavAction::None
+        };
+    }
+    if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::NONE {
+        app.thread_prefix_pending = true;
+        return NavAction::None;
+    }
+    let action = handle_navigation_key(app, key);
+    if before != (app.main_pane.cursor_row, app.global.focus) || key.code == KeyCode::Enter {
+        app.acknowledge_focused_reply();
+    }
+    action
+}
+
+fn handle_navigation_key(app: &mut App, key: KeyEvent) -> NavAction {
     if app.note_input_active() {
         return handle_note_input_key_event(app, key);
     }
@@ -545,6 +595,131 @@ mod tests {
             app.layout.as_ref().unwrap().base.plan.files[0]
                 .hunks
                 .is_empty()
+        );
+    }
+
+    fn add_unread_reply(app: &mut App) {
+        let mut note = crate::note::Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "file2.rs".into(),
+            },
+            crate::note::AgentProvider::Codex,
+            "prompt".into(),
+            1,
+        );
+        let thread = note.agent_thread_mut().unwrap();
+        assert!(thread.mark_running(1, std::time::Instant::now()));
+        assert!(thread.complete(1, "s".into(), "new reply".into()));
+        app.notes.items.push(note);
+        app.layout = None;
+        render::ensure_layout(app, AREA);
+    }
+
+    fn key(app: &mut App, ch: char) -> NavAction {
+        handle_key_event(
+            app,
+            KeyEvent::new(
+                KeyCode::Char(ch),
+                if ch.is_uppercase() {
+                    KeyModifiers::SHIFT
+                } else {
+                    KeyModifiers::NONE
+                },
+            ),
+        )
+    }
+
+    #[test]
+    fn reply_keys_work_from_both_panes_and_do_not_intercept_the_composer() {
+        for pane in [FocusPane::Main, FocusPane::Files] {
+            for direction in ['a', 'A'] {
+                let mut app = app();
+                add_unread_reply(&mut app);
+                app.global.focus = pane;
+                key(&mut app, 'g');
+                assert!(matches!(
+                    key(&mut app, direction),
+                    NavAction::RevealAgentReply(1)
+                ));
+                assert_eq!(app.current_note_id(), Some(1));
+                assert_eq!(app.global.focus, FocusPane::Main);
+                assert!(
+                    !app.notes.items[0]
+                        .agent_thread()
+                        .unwrap()
+                        .has_unread_reply()
+                );
+            }
+        }
+        let mut app = app();
+        add_unread_reply(&mut app);
+        app.start_new_note_input();
+        key(&mut app, 'g');
+        key(&mut app, 'a');
+        assert_eq!(app.notes.composer.as_ref().unwrap().draft, "ga");
+        assert!(
+            app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
+        );
+    }
+
+    #[test]
+    fn reply_prefix_cancels_and_hunk_keys_remain_immediate() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        key(&mut app, 'g');
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.thread_prefix_pending);
+        assert!(matches!(key(&mut app, 'a'), NavAction::None));
+        key(&mut app, 'g');
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!app.thread_prefix_pending);
+        key(&mut app, 'a');
+        assert!(
+            app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
+        );
+        app.global.focus = FocusPane::Main;
+        assert!(matches!(key(&mut app, ']'), NavAction::RevealSelectedHunk));
+        assert_eq!(app.main_pane.selected_hunk, 1);
+        assert!(matches!(key(&mut app, '['), NavAction::RevealSelectedHunk));
+        assert_eq!(app.main_pane.selected_hunk, 0);
+        key(&mut app, 'g');
+        assert!(matches!(key(&mut app, 'n'), NavAction::None));
+        assert!(!app.thread_prefix_pending);
+        assert!(app.note_input_active());
+    }
+
+    #[test]
+    fn frame_sync_and_unrelated_keys_do_not_acknowledge_new_arrivals() {
+        let mut app = app();
+        add_unread_reply(&mut app);
+        app.notes.expanded_ids.push(1);
+        app.layout = None;
+        render::ensure_layout(&mut app, AREA);
+        let bounds = app.layout.as_ref().unwrap().latest_reply_bounds(1).unwrap();
+        app.main_pane.cursor_row = bounds.start;
+        app.sync_selection_to_cursor();
+        render::ensure_layout(&mut app, AREA);
+        app.sync_selection_to_cursor();
+        key(&mut app, 'x');
+        assert!(
+            app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
+        );
+        key(&mut app, 'j');
+        assert!(
+            !app.notes.items[0]
+                .agent_thread()
+                .unwrap()
+                .has_unread_reply()
         );
     }
 }

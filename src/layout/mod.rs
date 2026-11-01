@@ -430,6 +430,36 @@ impl Layout {
         Some(base_index + inserted_before_or_at)
     }
 
+    pub fn navigation_base_row(session: &DiffSession, context: RowContext) -> Option<usize> {
+        plan_row_index_for_context(session, &LayoutPlan::new(session, &[]), context)
+    }
+
+    /// Resolves note targets in diff order, including collapsed and unloaded hunks.
+    pub fn note_targets(
+        session: &DiffSession,
+        notes: &[crate::note::Note],
+    ) -> Vec<(usize, RowContext)> {
+        let plan = LayoutPlan::new(session, &[]);
+        let contexts = plan::plan_row_contexts(session, &plan);
+        let mut targets: Vec<_> = notes::build_note_anchors(session, notes, &contexts)
+            .into_iter()
+            .map(|(row, note)| (row, RowContext::note(contexts[row], note.id)))
+            .collect();
+        targets.sort_by_key(|(row, _)| *row);
+        targets
+    }
+
+    /// Returns the latest expanded response rows in rendered coordinates.
+    pub fn latest_reply_bounds(&self, note_id: u64) -> Option<Range<usize>> {
+        let insertion = self
+            .note_insertions
+            .iter()
+            .find(|insertion| insertion.context.note_id == Some(note_id))?;
+        let relative = insertion.latest_reply_bounds.clone()?;
+        let start = note_row_index(&self.note_insertions, insertion.context)?;
+        Some(start + relative.start..start + relative.end)
+    }
+
     /// Returns the absolute rendered rows reserved for a note's reply composer.
     pub fn note_composer_bounds(&self, note_id: u64) -> Option<Range<usize>> {
         let mut inserted_before = 0usize;

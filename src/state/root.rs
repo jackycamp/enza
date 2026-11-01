@@ -35,6 +35,7 @@ pub struct App {
     pub notes: NoteState,
     pub agent_runtime: AgentRuntime,
     pub agent_animation_phase: Option<u128>,
+    pub thread_prefix_pending: bool,
 }
 
 impl App {
@@ -76,6 +77,7 @@ impl App {
             notes: NoteState::default(),
             agent_runtime: AgentRuntime::new(),
             agent_animation_phase: None,
+            thread_prefix_pending: false,
         }
     }
 

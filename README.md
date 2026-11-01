@@ -75,6 +75,14 @@ Press Ctrl+C on the collapsed header to reopen it. A green check mark identifies
 files you have viewed by collapsing them. The check mark remains after reopening
 until you exit the session.
 
+Agent replies show a purple `●` beside their file and containing folders until
+read. Press `ga` for the next unread reply or `gA` for the previous unread reply.
+These commands wrap in diff order and work from either pane outside the note
+composer. A jump opens the file and thread and focuses the newest reply.
+Focusing the newest reply in an expanded thread also marks it read. Selecting
+the file or seeing a reply elsewhere in the pane does not mark it read.
+Unread markers last for the current session.
+
 ## Build and run on macOS
 
 Install the system build tools:

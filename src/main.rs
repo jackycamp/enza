@@ -33,13 +33,12 @@ use crate::{
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
     let repo_path = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
-    let direct_diff = match &cli.command {
-        Some(Command::Diff(args)) => Some((
+    let direct_diff = cli.command.as_ref().map(|Command::Diff(args)| {
+        (
             args.diff_target().unwrap_or_else(|error| error.exit()),
             args.diff_filter().unwrap_or_else(|error| error.exit()),
-        )),
-        None => None,
-    };
+        )
+    });
 
     let mut terminal = setup_terminal()?;
     let result = match direct_diff {
@@ -150,6 +149,9 @@ fn run_loaded_app(
             match action {
                 NavAction::RevealSelectedHunk => {
                     render::reveal_selected_hunk(&mut app, viewport_area)
+                }
+                NavAction::RevealAgentReply(note_id) => {
+                    render::reveal_agent_reply(&mut app, viewport_area, note_id);
                 }
                 NavAction::SyncSelectionToScroll => {
                     app.sync_selection_to_cursor();

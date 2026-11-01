@@ -163,6 +163,18 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
     ensure_cursor_visible(app, area);
 }
 
+pub fn reveal_agent_reply(app: &mut App, area: Rect, note_id: u64) {
+    if let Some(bounds) = app
+        .layout
+        .as_ref()
+        .and_then(|layout| layout.latest_reply_bounds(note_id))
+    {
+        app.main_pane.cursor_row = bounds.start;
+        app.main_pane.scroll = bounds.start as u16;
+        ensure_cursor_visible(app, area);
+    }
+}
+
 pub fn ensure_cursor_visible(app: &mut App, area: Rect) {
     let visible_lines = viewport_line_capacity(app, area);
     let cursor_row = app.main_pane.cursor_row as u16;
@@ -504,6 +516,18 @@ fn sidebar_entry_label(app: &App, entry: &SidebarEntry, width: usize) -> String 
 }
 
 fn sidebar_entry_line(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
+    if app.sidebar_entry_has_unread(entry) && width >= 2 {
+        let mut line = sidebar_entry_content(app, entry, width - 2);
+        line.spans.push(Span::styled(
+            " ●",
+            Style::default().fg(Color::Rgb(180, 120, 255)),
+        ));
+        return line;
+    }
+    sidebar_entry_content(app, entry, width)
+}
+
+fn sidebar_entry_content(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
     let label = sidebar_entry_label(app, entry, width);
     let base_style = sidebar_entry_style(app, entry);
     let SidebarEntryKind::File { file_index } = entry.kind else {
@@ -880,5 +904,73 @@ mod tests {
     fn middle_truncation_preserves_both_ends() {
         assert_eq!(truncate_middle("MarkdownEditor", 9), "Mark…itor");
         assert_eq!(truncate_middle("short", 9), "short");
+    }
+
+    #[test]
+    fn unread_dot_preserves_filename_status_and_directory_color() {
+        use crate::diff::{DiffFile, DiffSession};
+        use crate::note::{AgentProvider, Note};
+        use crate::state::{App, SidebarEntry, SidebarEntryKind};
+        use ratatui::style::Color;
+        let mut app = App::new(DiffSession {
+            files: vec![DiffFile {
+                path: "src/very_long_file_name.rs".into(),
+                old_path: "src/very_long_file_name.rs".into(),
+                new_path: "src/very_long_file_name.rs".into(),
+                hunks: vec![],
+            }],
+        });
+        let mut note = Note::new_agent(
+            1,
+            NoteTarget::File {
+                file_path: "src/very_long_file_name.rs".into(),
+            },
+            AgentProvider::Codex,
+            "prompt".into(),
+            1,
+        );
+        let thread = note.agent_thread_mut().unwrap();
+        thread.mark_running(1, std::time::Instant::now());
+        thread.complete(1, "s".into(), "reply".into());
+        app.notes.items.push(note);
+        let file = SidebarEntry {
+            depth: 1,
+            label: "very_long_file_name.rs".into(),
+            kind: SidebarEntryKind::File { file_index: 0 },
+        };
+        let directory = SidebarEntry {
+            depth: 0,
+            label: "▸ src".into(),
+            kind: SidebarEntryKind::Directory {
+                path: "src".into(),
+                collapsed: true,
+            },
+        };
+        for width in [16, 24, 40] {
+            let line = super::sidebar_entry_line(&app, &file, width);
+            assert!(line.width() <= width);
+            assert!(line.to_string().ends_with(" ●"));
+            assert!(line.to_string().contains(".rs"));
+            assert!(
+                line.spans
+                    .iter()
+                    .any(|span| span.content == "A" && span.style.fg == Some(Color::Green))
+            );
+            assert_eq!(
+                line.spans.last().unwrap().style.fg,
+                Some(Color::Rgb(180, 120, 255))
+            );
+        }
+        assert!(
+            super::sidebar_entry_line(&app, &directory, 20)
+                .to_string()
+                .contains("●")
+        );
+        app.notes.items[0].agent_thread_mut().unwrap().mark_read();
+        assert!(
+            !super::sidebar_entry_line(&app, &directory, 20)
+                .to_string()
+                .contains("●")
+        );
     }
 }

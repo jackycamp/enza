@@ -220,6 +220,7 @@ fn build_note_insertion(request: NoteInsertionRequest<'_>) -> NoteInsertion {
         side_by_side_rows: side_by_side.rows.into_iter().map(RenderRow::note).collect(),
         context: request.context,
         composer_bounds: inline.composer_bounds,
+        latest_reply_bounds: inline.latest_reply_bounds,
     }
 }
 
