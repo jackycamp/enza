@@ -498,62 +498,46 @@ fn fit_sidebar_width(area_width: u16, content_width: u16) -> u16 {
     desired.min(available)
 }
 
-fn sidebar_entry_label(app: &App, entry: &SidebarEntry, width: usize) -> String {
+fn sidebar_entry_line(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
+    let base_style = sidebar_entry_style(app, entry);
+    let unread = app.sidebar_entry_has_unread(entry);
     let SidebarEntryKind::File { file_index } = entry.kind else {
-        return truncate_middle(&entry.label, width);
+        if unread && width >= 2 {
+            return Line::from(vec![
+                Span::styled(truncate_middle(&entry.label, width - 2), base_style),
+                Span::styled(" ●", Style::default().fg(Color::Rgb(180, 120, 255))),
+            ]);
+        }
+        return Line::from(Span::styled(
+            truncate_middle(&entry.label, width),
+            base_style,
+        ));
     };
     let Some(file) = app.session.files.get(file_index) else {
-        return truncate_middle(&entry.label, width);
+        return Line::from(Span::styled(
+            truncate_middle(&entry.label, width),
+            base_style,
+        ));
     };
-
-    let status = match file.change_kind() {
-        FileChangeKind::Added => "A",
-        FileChangeKind::Deleted => "D",
-        FileChangeKind::Modified => "M",
+    let (marker, color) = if unread {
+        ("●", Color::Rgb(180, 120, 255))
+    } else {
+        match file.change_kind() {
+            FileChangeKind::Added => ("A", Color::Green),
+            FileChangeKind::Deleted => ("D", Color::Red),
+            FileChangeKind::Modified => ("M", Color::Yellow),
+        }
     };
     let file_name = file.path.rsplit('/').next().unwrap_or(file.path.as_str());
-    sidebar_file_label(entry.depth, file_name, status, width)
-}
-
-fn sidebar_entry_line(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
-    if app.sidebar_entry_has_unread(entry) && width >= 2 {
-        let mut line = sidebar_entry_content(app, entry, width - 2);
-        line.spans.push(Span::styled(
-            " ●",
-            Style::default().fg(Color::Rgb(180, 120, 255)),
-        ));
-        return line;
-    }
-    sidebar_entry_content(app, entry, width)
-}
-
-fn sidebar_entry_content(app: &App, entry: &SidebarEntry, width: usize) -> Line<'static> {
-    let label = sidebar_entry_label(app, entry, width);
-    let base_style = sidebar_entry_style(app, entry);
-    let SidebarEntryKind::File { file_index } = entry.kind else {
+    let label = sidebar_file_label(entry.depth, file_name, marker, width);
+    let marker_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let Some((leading, trailing)) = label.rsplit_once(marker) else {
         return Line::from(Span::styled(label, base_style));
     };
-    let Some(file) = app.session.files.get(file_index) else {
-        return Line::from(Span::styled(label, base_style));
-    };
-
-    let (status, color) = match file.change_kind() {
-        FileChangeKind::Added => ("A", Color::Green),
-        FileChangeKind::Deleted => ("D", Color::Red),
-        FileChangeKind::Modified => ("M", Color::Yellow),
-    };
-    let suffix = format!("{status}{}", " ".repeat(SIDEBAR_STATUS_RIGHT_PADDING));
-    let Some(leading) = label.strip_suffix(&suffix) else {
-        return Line::from(Span::styled(label, base_style));
-    };
-
     Line::from(vec![
         Span::styled(leading.to_string(), base_style),
-        Span::styled(
-            status.to_string(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ".repeat(SIDEBAR_STATUS_RIGHT_PADDING), base_style),
+        Span::styled(marker.to_string(), marker_style),
+        Span::styled(trailing.to_string(), base_style),
     ])
 }
 
@@ -817,6 +801,9 @@ fn row_index_for_context(
 }
 
 #[cfg(test)]
+mod sidebar_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         composer_visible_text, composer_width, composer_x, fit_sidebar_width, sidebar_file_label,
@@ -904,73 +891,5 @@ mod tests {
     fn middle_truncation_preserves_both_ends() {
         assert_eq!(truncate_middle("MarkdownEditor", 9), "Mark…itor");
         assert_eq!(truncate_middle("short", 9), "short");
-    }
-
-    #[test]
-    fn unread_dot_preserves_filename_status_and_directory_color() {
-        use crate::diff::{DiffFile, DiffSession};
-        use crate::note::{AgentProvider, Note};
-        use crate::state::{App, SidebarEntry, SidebarEntryKind};
-        use ratatui::style::Color;
-        let mut app = App::new(DiffSession {
-            files: vec![DiffFile {
-                path: "src/very_long_file_name.rs".into(),
-                old_path: "src/very_long_file_name.rs".into(),
-                new_path: "src/very_long_file_name.rs".into(),
-                hunks: vec![],
-            }],
-        });
-        let mut note = Note::new_agent(
-            1,
-            NoteTarget::File {
-                file_path: "src/very_long_file_name.rs".into(),
-            },
-            AgentProvider::Codex,
-            "prompt".into(),
-            1,
-        );
-        let thread = note.agent_thread_mut().unwrap();
-        thread.mark_running(1, std::time::Instant::now());
-        thread.complete(1, "s".into(), "reply".into());
-        app.notes.items.push(note);
-        let file = SidebarEntry {
-            depth: 1,
-            label: "very_long_file_name.rs".into(),
-            kind: SidebarEntryKind::File { file_index: 0 },
-        };
-        let directory = SidebarEntry {
-            depth: 0,
-            label: "▸ src".into(),
-            kind: SidebarEntryKind::Directory {
-                path: "src".into(),
-                collapsed: true,
-            },
-        };
-        for width in [16, 24, 40] {
-            let line = super::sidebar_entry_line(&app, &file, width);
-            assert!(line.width() <= width);
-            assert!(line.to_string().ends_with(" ●"));
-            assert!(line.to_string().contains(".rs"));
-            assert!(
-                line.spans
-                    .iter()
-                    .any(|span| span.content == "A" && span.style.fg == Some(Color::Green))
-            );
-            assert_eq!(
-                line.spans.last().unwrap().style.fg,
-                Some(Color::Rgb(180, 120, 255))
-            );
-        }
-        assert!(
-            super::sidebar_entry_line(&app, &directory, 20)
-                .to_string()
-                .contains("●")
-        );
-        app.notes.items[0].agent_thread_mut().unwrap().mark_read();
-        assert!(
-            !super::sidebar_entry_line(&app, &directory, 20)
-                .to_string()
-                .contains("●")
-        );
     }
 }
