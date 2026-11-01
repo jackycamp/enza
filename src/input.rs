@@ -100,7 +100,10 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> NavAction {
     }
     let action = handle_navigation_key(app, key);
     let focus_moved = before != (app.main_pane.cursor_row, app.global.focus);
-    if focus_moved || key.code == KeyCode::Enter {
+    // Deferred reveals have not established their destination yet.
+    if matches!(action, NavAction::None | NavAction::SyncSelectionToScroll)
+        && (focus_moved || key.code == KeyCode::Enter)
+    {
         app.acknowledge_focused_reply();
     }
     // Opening a reply composer moves the cursor without requesting a reveal.
@@ -811,5 +814,50 @@ mod tests {
         apply_batch_action(&mut app, jump.merge(collapse));
         assert!(!app.notes.expanded_ids.contains(&1));
         assert_eq!(app.main_pane.cursor_row, expected);
+    }
+
+    #[test]
+    fn deferred_hunk_reveals_do_not_acknowledge_the_previous_cursor() {
+        for command in ['b', '\n'] {
+            let mut app = app();
+            add_unread_reply(&mut app);
+            app.notes.expanded_ids.push(1);
+            app.layout = None;
+            render::ensure_layout(&mut app, AREA);
+            let bounds = app.layout.as_ref().unwrap().latest_reply_bounds(1).unwrap();
+            app.main_pane.cursor_row = bounds.start;
+            app.sync_selection_to_cursor();
+            app.global.focus = FocusPane::Files;
+            let action = if command == '\n' {
+                handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            } else {
+                key(&mut app, command)
+            };
+            assert!(matches!(action, NavAction::RevealSelectedHunk));
+            assert!(
+                app.notes.items[0]
+                    .agent_thread()
+                    .unwrap()
+                    .has_unread_reply(),
+                "{command:?} has not visited the reply before its deferred reveal"
+            );
+            apply_batch_action(&mut app, action);
+            assert_eq!(
+                app.global.focus,
+                if command == 'b' {
+                    FocusPane::Main
+                } else {
+                    FocusPane::Files
+                }
+            );
+            assert_ne!(app.current_note_id(), Some(1));
+            assert!(
+                app.notes.items[0]
+                    .agent_thread()
+                    .unwrap()
+                    .has_unread_reply(),
+                "{command:?} reveals a hunk header without visiting the reply"
+            );
+        }
     }
 }
