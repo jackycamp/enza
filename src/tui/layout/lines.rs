@@ -6,8 +6,8 @@ use ratatui::{
 };
 
 use crate::core::diff::{DiffFile, DiffLine};
-use crate::highlight::{DiffKind, FileHighlighter};
-use crate::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
+use crate::tui::highlight::{DiffKind, FileHighlighter};
+use crate::tui::layout::text::{fit_text, format_lineno, pad_to_width, truncate_text};
 
 const INLINE_CODE_INDENT: usize = 12;
 const SIDE_BY_SIDE_CODE_INDENT: usize = 7;

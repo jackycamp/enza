@@ -1,8 +1,8 @@
 use crate::core::diff::DiffSession;
-use crate::layout::layout_tree::LayoutTree;
-use crate::layout::primitives::{HunkRange, LayoutPlan};
-use crate::layout::window::{LayoutBuildOptions, apply_loaded_hunk_window_sync};
 use crate::log;
+use crate::tui::layout::layout_tree::LayoutTree;
+use crate::tui::layout::primitives::{HunkRange, LayoutPlan};
+use crate::tui::layout::window::{LayoutBuildOptions, apply_loaded_hunk_window_sync};
 
 #[derive(Clone, Debug)]
 pub struct BaseLayout {

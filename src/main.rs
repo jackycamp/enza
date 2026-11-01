@@ -2,33 +2,14 @@ mod agent;
 mod cli;
 mod core;
 mod git;
-mod highlight;
-mod input;
-mod landing;
-mod layout;
 mod log;
-mod render;
-mod state;
+mod tui;
 
-use std::io;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::{io, path::PathBuf};
 
 use clap::Parser;
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{Terminal, prelude::CrosstermBackend};
 
-use crate::{
-    agent::ReviewContext,
-    cli::{Cli, Command},
-    core::diff::{DiffFilter, DiffSession, DiffTarget},
-    git::discover_repo_root,
-    state::{App, FocusPane},
-};
+use crate::cli::{Cli, Command};
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
@@ -40,117 +21,5 @@ fn main() -> io::Result<()> {
         )
     });
 
-    let mut terminal = setup_terminal()?;
-    let result = match direct_diff {
-        Some((diff_target, diff_filter)) => run_app(
-            &mut terminal,
-            &repo_path,
-            &diff_target,
-            diff_filter.as_ref(),
-        ),
-        None => run_landing_flow(&mut terminal, &repo_path),
-    };
-    restore_terminal(&mut terminal)?;
-    result
-}
-
-fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    Terminal::new(CrosstermBackend::new(stdout))
-}
-
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()
-}
-
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    repo_path: &Path,
-    diff_target: &DiffTarget,
-    diff_filter: Option<&DiffFilter>,
-) -> io::Result<()> {
-    let mut diff_load = log::timer("diff_load");
-    let session = crate::git::load_session(repo_path, diff_target, diff_filter).unwrap_or_default();
-
-    diff_load.field("files", session.num_files());
-    diff_load.field("hunks", session.num_hunks());
-    diff_load.field("lines", session.num_lines());
-
-    run_loaded_app(terminal, repo_path, diff_target, session)
-}
-
-fn run_loaded_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    repo_path: &Path,
-    diff_target: &DiffTarget,
-    session: DiffSession,
-) -> io::Result<()> {
-    let repo_root = discover_repo_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
-    let mut app =
-        App::new_with_review_context(session, ReviewContext::new(repo_root, diff_target.clone()));
-    let first_frame_start = Instant::now();
-    let mut first_frame_logged = false;
-
-    while app.global.running {
-        app.drain_agent_events();
-        let viewport_area = terminal.get_frame().area();
-        render::ensure_layout(&mut app, viewport_area);
-        app.clamp_cursor_row(render::max_cursor_row(&app));
-        app.sync_selection_to_cursor();
-        render::ensure_cursor_visible(&mut app, viewport_area);
-
-        app.main_pane.scroll = app
-            .main_pane
-            .scroll
-            .min(render::max_scroll(&app, viewport_area));
-
-        if app.global.focus != FocusPane::Files {
-            app.sync_sidebar_cursor_to_selected_file();
-        }
-
-        terminal.draw(|frame| render::render(frame, &app))?;
-
-        if !first_frame_logged {
-            let elapsed_ms = first_frame_start.elapsed().as_millis().to_string();
-            let num_rows = app
-                .layout
-                .as_ref()
-                .map(|layout| layout.row_count)
-                .unwrap_or(0)
-                .to_string();
-            let mut fields = vec![("elapsed_ms", elapsed_ms), ("rows", num_rows)];
-            if let Some(rss_mb) = log::current_rss_mb() {
-                fields.push(("rss_mb", rss_mb));
-            }
-
-            log::add_event("first_frame", &fields);
-            first_frame_logged = true;
-        }
-
-        if let Some(action) = input::poll_and_handle_events(&mut app)? {
-            let viewport_area = terminal.get_frame().area();
-            input::complete_navigation(&mut app, viewport_area, action);
-        }
-    }
-
-    Ok(())
-}
-
-fn run_landing_flow(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    repo_path: &Path,
-) -> io::Result<()> {
-    let Some(loaded) = landing::run_landing_page(terminal, repo_path)? else {
-        return Ok(());
-    };
-
-    run_loaded_app(terminal, repo_path, &loaded.target, loaded.session)
+    tui::run(&repo_path, direct_diff)
 }

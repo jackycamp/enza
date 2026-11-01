@@ -1,3 +1,5 @@
+//! Terminal event handling and review navigation commands.
+
 use std::{io, time::Duration};
 
 use crossterm::event::{
@@ -5,8 +7,8 @@ use crossterm::event::{
 };
 
 use crate::{
-    render,
-    state::{App, FocusPane, ReplyDirection},
+    tui::render,
+    tui::state::{App, FocusPane, ReplyDirection},
 };
 
 pub enum NavAction {
@@ -337,7 +339,7 @@ mod tests {
     use super::*;
     use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
     use crate::core::note::NoteTarget;
-    use crate::layout::{RowContext, RowKind, RowViewState};
+    use crate::tui::layout::{RowContext, RowKind, RowViewState};
     use ratatui::layout::Rect;
 
     const AREA: Rect = Rect::new(0, 0, 120, 30);

@@ -1,11 +1,11 @@
-use crate::layout::LayoutDisplayContext;
+use crate::tui::layout::LayoutDisplayContext;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
-use crate::layout::plan::plan_row_contexts;
-use crate::layout::{
+use crate::tui::layout::plan::plan_row_contexts;
+use crate::tui::layout::{
     HunkWindowTarget, Layout, LayoutBuildOptions, LayoutWidths, LayoutWorker, RowKind,
 };
 

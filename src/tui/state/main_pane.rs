@@ -1,6 +1,6 @@
 //! Cursor, selection and scrolling state for the main diff pane.
 
-use crate::layout::{FileDisplayState, RowContext};
+use crate::tui::layout::{FileDisplayState, RowContext};
 
 #[derive(Debug)]
 pub struct MainPaneState {

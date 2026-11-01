@@ -5,9 +5,9 @@
 
 use std::collections::HashSet;
 
-use crate::layout::primitives::LayoutPlan;
-use crate::layout::window::HunkWindowTarget;
-use crate::layout::worker::HunkBuildKey;
+use crate::tui::layout::primitives::LayoutPlan;
+use crate::tui::layout::window::HunkWindowTarget;
+use crate::tui::layout::worker::HunkBuildKey;
 
 pub(super) struct HunkLoadPlan {
     desired: HashSet<HunkBuildKey>,
@@ -256,7 +256,7 @@ fn try_extend_up(
 mod tests {
     use super::*;
     use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
-    use crate::layout::primitives::LayoutPlan;
+    use crate::tui::layout::primitives::LayoutPlan;
 
     #[test]
     fn planner_expands_after_the_selected_hunk_to_cover_the_viewport() {

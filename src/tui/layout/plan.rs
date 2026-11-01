@@ -8,9 +8,9 @@
 use ratatui::text::Line;
 
 use crate::core::diff::DiffSession;
-use crate::layout::layout_tree::{CachedRows, LayoutTree, NodeStatus};
-use crate::layout::lines::{hunk_header_line, side_by_side_hunk_header_line};
-use crate::layout::primitives::{
+use crate::tui::layout::layout_tree::{CachedRows, LayoutTree, NodeStatus};
+use crate::tui::layout::lines::{hunk_header_line, side_by_side_hunk_header_line};
+use crate::tui::layout::primitives::{
     FileDisplayState, HunkRange, LayoutPlan, PlannedFile, PlannedHunk, RenderRow, RowContext,
     RowId, RowKind,
 };

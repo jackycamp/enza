@@ -1,3 +1,5 @@
+//! Syntax and diff highlighting for terminal rows.
+
 use once_cell::sync::Lazy;
 use ratatui::{
     style::{Color, Style},
@@ -116,7 +118,7 @@ fn plain_span(text: &str, background: Option<Color>) -> Span<'static> {
 #[cfg(test)]
 mod tests {
     use super::{FileHighlighter, syntax_for_path};
-    use crate::highlight::DiffKind;
+    use crate::tui::highlight::DiffKind;
 
     #[test]
     fn swift_files_use_syntax_highlighting() {

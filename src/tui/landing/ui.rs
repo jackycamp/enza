@@ -1,3 +1,5 @@
+//! Landing screen rendering and interaction.
+
 use std::{
     io,
     path::Path,
@@ -16,11 +18,9 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use super::loader::{
-    DiffLoadWorker, LandingData, LandingSuggestion, LandingWorker, LoadedDiff,
-    loading_worktree_suggestion,
-};
+use super::loader::{DiffLoadWorker, LandingWorker, LoadedDiff, loading_worktree_suggestion};
 use crate::core::diff::{DiffFilter, DiffStats, DiffTarget};
+use crate::git::{ReviewSuggestion, ReviewSuggestions};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const BASELINE_PARTICLE_COUNT: usize = 32;
@@ -35,7 +35,7 @@ const LOGO: &[&str] = &[
 ];
 
 struct LandingApp {
-    suggestions: Vec<LandingSuggestion>,
+    suggestions: Vec<ReviewSuggestion>,
     selected: usize,
     particles: ParticleField,
 }
@@ -152,7 +152,7 @@ impl LandingApp {
         }
     }
 
-    fn apply_data(&mut self, data: LandingData) {
+    fn apply_data(&mut self, data: ReviewSuggestions) {
         let selected_command = self
             .suggestions
             .get(self.selected)
@@ -629,8 +629,8 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::{
-        BASELINE_PARTICLE_COUNT, LandingApp, LandingData, LandingSuggestion, MAX_PARTICLE_COUNT,
-        OpeningAction, handle_opening_event, particle_count, render,
+        BASELINE_PARTICLE_COUNT, LandingApp, MAX_PARTICLE_COUNT, OpeningAction, ReviewSuggestion,
+        ReviewSuggestions, handle_opening_event, particle_count, render,
     };
     use crate::core::diff::{DiffStats, DiffTarget};
 
@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn loaded_suggestions_replace_the_placeholder_and_preserve_selection() {
         let mut app = LandingApp::new();
-        app.apply_data(LandingData {
+        app.apply_data(ReviewSuggestions {
             suggestions: vec![
                 suggestion("enza diff --cached", DiffTarget::Cached),
                 suggestion("enza diff", DiffTarget::Worktree),
@@ -726,8 +726,8 @@ mod tests {
         );
     }
 
-    fn suggestion(command: &str, target: DiffTarget) -> LandingSuggestion {
-        LandingSuggestion {
+    fn suggestion(command: &str, target: DiffTarget) -> ReviewSuggestion {
+        ReviewSuggestion {
             title: "Review changes".to_string(),
             command: command.to_string(),
             detail: "Details".to_string(),

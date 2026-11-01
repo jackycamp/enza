@@ -7,13 +7,13 @@
 use ratatui::text::Line;
 
 use crate::core::diff::{DiffFile, DiffHunk, DiffSession};
-use crate::highlight::FileHighlighter;
-use crate::layout::lines::{
+use crate::tui::highlight::FileHighlighter;
+use crate::tui::layout::lines::{
     FileHeaderRenderer, FileHeaderSelection, InlineDiffLine, build_combined_side_line,
     file_separator_line, hunk_header_line, side_by_side_hunk_header_line,
 };
-use crate::layout::primitives::{FileDisplayState, LayoutWidths, RenderRow, RowContext};
-use crate::layout::window::LayoutBuildOptions;
+use crate::tui::layout::primitives::{FileDisplayState, LayoutWidths, RenderRow, RowContext};
+use crate::tui::layout::window::LayoutBuildOptions;
 
 #[derive(Clone, Debug)]
 pub struct LayoutTree {

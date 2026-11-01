@@ -6,11 +6,11 @@
 //! render rows are currently kept in memory.
 
 use crate::core::diff::DiffSession;
-use crate::layout::hunk_load_plan::HunkLoadPlan;
-use crate::layout::layout_tree::{CachedRows, HunkNode, LayoutTree, NodeStatus};
-use crate::layout::primitives::LayoutPlan;
-use crate::layout::primitives::{LayoutDisplayContext, LayoutWidths};
-use crate::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
+use crate::tui::layout::hunk_load_plan::HunkLoadPlan;
+use crate::tui::layout::layout_tree::{CachedRows, HunkNode, LayoutTree, NodeStatus};
+use crate::tui::layout::primitives::LayoutPlan;
+use crate::tui::layout::primitives::{LayoutDisplayContext, LayoutWidths};
+use crate::tui::layout::worker::{HunkBuildWindowRequest, LayoutWorker};
 
 /// Selection and viewport inputs used to choose which hunks are loaded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

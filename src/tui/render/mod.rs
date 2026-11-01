@@ -1,4 +1,6 @@
-use crate::layout::LayoutDisplayContext;
+//! Terminal drawing and viewport coordination for the review screen.
+
+use crate::tui::layout::LayoutDisplayContext;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout as FrameLayout, Rect},
@@ -9,12 +11,12 @@ use ratatui::{
 
 use crate::core::diff::FileChangeKind;
 use crate::core::note::NoteTarget;
-use crate::layout::{
+use crate::log;
+use crate::tui::layout::{
     DiffSide, HunkWindowTarget, Layout as DiffLayout, LayoutBuildOptions, LayoutWidths, NodeStatus,
     RowViewState, note_side, styled_mentions, width_for_side,
 };
-use crate::log;
-use crate::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
+use crate::tui::state::{App, DiffMode, FocusPane, SidebarEntry, SidebarEntryKind};
 
 const OVERSCAN_MULTIPLIER: usize = 2;
 const SIDEBAR_MIN_WIDTH: u16 = 28;
@@ -160,7 +162,7 @@ pub fn reveal_selected_hunk(app: &mut App, area: Rect) {
 
     let header_row = layout.row_index_for_context(
         &app.session,
-        crate::layout::RowContext::file_header(app.main_pane.selected_file),
+        crate::tui::layout::RowContext::file_header(app.main_pane.selected_file),
     );
     let hunk_row = layout
         .hunk_ranges
@@ -373,7 +375,7 @@ fn render_note_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let draft = &composer.draft;
     let target = app.composer_note_target();
     let mut title = match composer.mode {
-        crate::state::NoteComposerMode::Reply { note_id } => app
+        crate::tui::state::NoteComposerMode::Reply { note_id } => app
             .notes
             .items
             .iter()
@@ -830,7 +832,7 @@ fn row_view_state(app: &App, cursor_focused: bool) -> RowViewState {
 fn row_index_for_context(
     layout: &DiffLayout,
     session: &crate::core::diff::DiffSession,
-    target: crate::layout::RowContext,
+    target: crate::tui::layout::RowContext,
 ) -> Option<usize> {
     layout.row_index_for_context(session, target)
 }
@@ -845,7 +847,7 @@ mod tests {
         truncate_filename, truncate_middle,
     };
     use crate::core::note::NoteTarget;
-    use crate::state::DiffMode;
+    use crate::tui::state::DiffMode;
     use ratatui::layout::Rect;
 
     #[test]

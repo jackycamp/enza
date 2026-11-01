@@ -5,8 +5,8 @@ use std::thread;
 use std::time::Instant;
 
 use crate::core::diff::DiffSession;
-use crate::layout::layout_tree::HunkNode;
-use crate::layout::primitives::LayoutWidths;
+use crate::tui::layout::layout_tree::HunkNode;
+use crate::tui::layout::primitives::LayoutWidths;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HunkBuildKey {

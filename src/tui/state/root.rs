@@ -17,8 +17,10 @@ use crate::core::diff::{DiffSession, DiffStats};
 #[cfg(test)]
 use crate::core::note::AgentProvider;
 use crate::core::note::{Note, NoteTarget};
-use crate::layout::{FileDisplayState, Layout, LayoutDisplayContext, LayoutWorker, RowContext};
-use crate::state::{
+use crate::tui::layout::{
+    FileDisplayState, Layout, LayoutDisplayContext, LayoutWorker, RowContext,
+};
+use crate::tui::state::{
     DiffMode, FocusPane, GlobalState, MainPaneState, NoteInputResult, NoteState, SidebarEntry,
     SidebarState, note_target_for_range, note_target_for_row,
 };
@@ -333,7 +335,7 @@ impl App {
         }
         if matches!(
             self.notes.composer_mode(),
-            Some(crate::state::NoteComposerMode::Reply { .. })
+            Some(crate::tui::state::NoteComposerMode::Reply { .. })
         ) {
             if !self.notes.expanded_ids.contains(&note_id) {
                 self.notes.expanded_ids.push(note_id);
@@ -348,7 +350,7 @@ impl App {
     pub fn cancel_note_input(&mut self) {
         let was_reply = matches!(
             self.notes.composer_mode(),
-            Some(crate::state::NoteComposerMode::Reply { .. })
+            Some(crate::tui::state::NoteComposerMode::Reply { .. })
         );
         self.notes.cancel_input();
         if was_reply {
@@ -367,7 +369,7 @@ impl App {
     pub fn submit_note_input(&mut self) {
         let was_reply = matches!(
             self.notes.composer_mode(),
-            Some(crate::state::NoteComposerMode::Reply { .. })
+            Some(crate::tui::state::NoteComposerMode::Reply { .. })
         );
         let Some(result) = self.notes.finish_input() else {
             if was_reply {
@@ -535,7 +537,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::core::diff::{DiffHunk, DiffLine};
-    use crate::layout::{HunkWindowTarget, LayoutBuildOptions, LayoutWidths, RowKind};
+    use crate::tui::layout::{HunkWindowTarget, LayoutBuildOptions, LayoutWidths, RowKind};
 
     fn app_with_hunks(count: usize) -> App {
         App::new(DiffSession {
@@ -855,7 +857,7 @@ mod tests {
         app.start_contextual_note_input();
         assert_eq!(
             app.notes.composer_mode(),
-            Some(crate::state::NoteComposerMode::EditPersonal { note_id: 1 })
+            Some(crate::tui::state::NoteComposerMode::EditPersonal { note_id: 1 })
         );
 
         app.cancel_note_input();
@@ -863,7 +865,7 @@ mod tests {
         app.start_contextual_note_input();
         assert_eq!(
             app.notes.composer_mode(),
-            Some(crate::state::NoteComposerMode::Create)
+            Some(crate::tui::state::NoteComposerMode::Create)
         );
     }
 

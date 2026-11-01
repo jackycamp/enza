@@ -159,6 +159,31 @@ cargo install --path . --root ~/.local
 enza
 ```
 
+## Source structure
+
+Enza uses one Rust crate. Source directories group code by responsibility:
+
+```text
+src/
+  main.rs          CLI parsing and startup
+  cli.rs           Commands and arguments
+  log.rs           Shared diagnostic logging
+  core/            Diff models, filters, statistics, notes and thread state
+  git/             Repository access, diff loading and review suggestions
+  agent/           Agent prompts, provider adapters and runtime
+  tui/
+    app.rs         Terminal lifecycle and application loop
+    input.rs       Terminal events and key bindings
+    highlight.rs   Syntax highlighting
+    state/         Panes, cursor, selection and review transitions
+    layout/        Diff rows, note placement and layout workers
+    render/        Terminal drawing
+    landing/       Landing screen and background worker coordination
+```
+
+`core/` has no Git or terminal dependencies. `git/` and `agent/` use shared models and do not depend on `tui/`.
+`tui/` state owns terminal layout and navigation. Tests stay with the code they check; Git repository fixtures live in `git/tests.rs`.
+
 ## Development checks
 
 ```sh

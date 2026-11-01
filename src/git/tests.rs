@@ -425,3 +425,90 @@ fn stats_loader_reuses_worktree_and_equivalent_tree_diffs() {
         .expect("reuse range stats for equivalent merge-base trees");
     assert_eq!(loader.cache.len(), 2);
 }
+
+#[test]
+fn review_suggestions_preserve_order_filters_and_counts() {
+    let fixture = TestRepo::new();
+    fs::write(fixture.path().join("modified.txt"), "before\nafter\n")
+        .expect("modify suggestion fixture");
+    fs::remove_file(fixture.path().join("deleted.txt")).expect("delete suggestion fixture");
+    fs::write(fixture.path().join("untracked.txt"), "first\nsecond\n")
+        .expect("write suggestion fixture");
+    let repo = fixture.open();
+    let mut index = repo.index().expect("open suggestion index");
+    index
+        .add_path(Path::new("modified.txt"))
+        .expect("stage suggestion fixture");
+    index.write().expect("write suggestion index");
+
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let data = load_suggestions(fixture.path(), &cancelled).expect("load review suggestions");
+    assert_eq!(
+        data.worktree_stats,
+        DiffStats {
+            files: 3,
+            additions: 3,
+            deletions: 1
+        }
+    );
+    let commands: Vec<_> = data
+        .suggestions
+        .iter()
+        .map(|item| item.command.as_str())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "enza diff",
+            "enza diff --cached",
+            "enza diff --diff-filter M",
+            "enza diff --diff-filter A",
+            "enza diff --diff-filter D"
+        ]
+    );
+    assert_eq!(data.suggestions[0].title, "Review your working tree");
+    assert_eq!(
+        data.suggestions[0].detail,
+        "Changes not yet staged. 3 files, +3, -1"
+    );
+    assert_eq!(data.suggestions[1].target, DiffTarget::Cached);
+    assert_eq!(
+        data.suggestions[1].detail,
+        "Staged for the next commit. 1 file, +1, -0"
+    );
+    for (suggestion, filter) in data.suggestions[2..].iter().zip(["M", "A", "D"]) {
+        assert_eq!(suggestion.target, DiffTarget::Worktree);
+        assert_eq!(suggestion.diff_filter, DiffFilter::parse(filter));
+    }
+    assert_eq!(
+        data.suggestions[2].detail,
+        "Working tree files changed in place. 1 file, +1, -0"
+    );
+    assert_eq!(
+        data.suggestions[3].detail,
+        "New or untracked working tree files. 1 file, +2, -0"
+    );
+    assert_eq!(
+        data.suggestions[4].detail,
+        "Working tree files removed from disk. 1 file, +0, -1"
+    );
+}
+
+#[test]
+fn review_suggestions_keep_missing_repository_fallback() {
+    let fixture = TestRepo::new();
+    let missing_path = fixture.path().join("missing");
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let data = load_suggestions(&missing_path, &cancelled).expect("missing repository fallback");
+    assert_eq!(data.worktree_stats, DiffStats::default());
+    assert_eq!(data.suggestions.len(), 1);
+    assert_eq!(data.suggestions[0].command, "enza diff");
+    assert_eq!(data.suggestions[0].detail, "No working tree changes");
+}
+
+#[test]
+fn cancelled_review_suggestion_load_discards_results() {
+    let fixture = TestRepo::new();
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    assert!(load_suggestions(fixture.path(), &cancelled).is_none());
+}

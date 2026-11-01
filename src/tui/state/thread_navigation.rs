@@ -1,7 +1,7 @@
 //! Unread agent replies and deliberate navigation to their latest response.
 
 use crate::core::note::Note;
-use crate::layout::{Layout, LayoutDisplayContext};
+use crate::tui::layout::{Layout, LayoutDisplayContext};
 
 use super::{App, FocusPane, SidebarEntry, SidebarEntryKind};
 
@@ -162,11 +162,11 @@ mod tests {
     use super::*;
     use crate::core::diff::{DiffFile, DiffHunk, DiffLine, DiffSession};
     use crate::core::note::{AgentProvider, NoteTarget};
-    use crate::layout::RowContext;
+    use crate::tui::layout::RowContext;
     use crate::{
-        input::{self, NavAction},
-        render,
-        state::DiffMode,
+        tui::input::{self, NavAction},
+        tui::render,
+        tui::state::DiffMode,
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use std::time::Instant;

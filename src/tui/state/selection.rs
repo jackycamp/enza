@@ -5,7 +5,7 @@
 use crate::{
     core::diff::DiffFile,
     core::note::NoteTarget,
-    layout::{RowContext, RowKind},
+    tui::layout::{RowContext, RowKind},
 };
 
 pub fn note_target_for_row(

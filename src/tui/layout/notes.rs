@@ -1,12 +1,12 @@
 use crate::core::diff::DiffSession;
 use crate::core::note::{Note, NoteTarget};
-use crate::layout::LayoutDisplayContext;
-use crate::layout::base_layout::BaseLayout;
-use crate::layout::note::{
+use crate::tui::layout::LayoutDisplayContext;
+use crate::tui::layout::base_layout::BaseLayout;
+use crate::tui::layout::note::{
     build_note_rows, note_wrap_width, render_note_rows, render_side_by_side_note_rows,
 };
-use crate::layout::plan::plan_row_contexts;
-use crate::layout::primitives::{
+use crate::tui::layout::plan::plan_row_contexts;
+use crate::tui::layout::primitives::{
     HunkRange, LayoutWidths, NoteInsertion, RenderRow, RowContext, RowKind,
 };
 
@@ -202,7 +202,7 @@ impl NoteInsertions {
 
 struct NoteInsertionRequest<'a> {
     base_index: usize,
-    note_rows: &'a [crate::layout::note::NoteRow],
+    note_rows: &'a [crate::tui::layout::note::NoteRow],
     note: &'a Note,
     context: RowContext,
     widths: LayoutWidths,
@@ -242,9 +242,9 @@ fn adjust_hunk_ranges_for_insertions(
 mod tests {
     use super::*;
     use crate::core::diff::{DiffFile, DiffHunk, DiffLine};
-    use crate::layout::base_layout::BaseLayout;
-    use crate::layout::layout_tree::LayoutTree;
-    use crate::layout::primitives::{LayoutPlan, LayoutWidths};
+    use crate::tui::layout::base_layout::BaseLayout;
+    use crate::tui::layout::layout_tree::LayoutTree;
+    use crate::tui::layout::primitives::{LayoutPlan, LayoutWidths};
 
     #[test]
     fn note_anchors_resolve_file_hunk_line_and_range_targets() {
@@ -324,7 +324,7 @@ mod tests {
         });
 
         let bounds = overlay.insertions[0].composer_bounds.clone().unwrap();
-        assert_eq!(bounds.len(), crate::layout::note::NOTE_COMPOSER_HEIGHT);
+        assert_eq!(bounds.len(), crate::tui::layout::note::NOTE_COMPOSER_HEIGHT);
         assert!(bounds.end < overlay.insertions[0].len());
     }
 
@@ -361,9 +361,9 @@ mod tests {
         BaseLayout {
             tree: LayoutTree::new(
                 session,
-                crate::layout::LayoutBuildOptions {
+                crate::tui::layout::LayoutBuildOptions {
                     widths: widths(),
-                    target: crate::layout::HunkWindowTarget {
+                    target: crate::tui::layout::HunkWindowTarget {
                         selected_file: 0,
                         selected_hunk: 0,
                         visible_start_row: None,

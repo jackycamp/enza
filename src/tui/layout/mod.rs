@@ -15,17 +15,19 @@ use ratatui::{
 };
 
 use crate::core::diff::DiffSession;
-use crate::layout::base_layout::BaseLayout;
-use crate::layout::layout_tree::HunkNode;
-use crate::layout::notes::{NoteOverlay, NoteOverlayRequest};
-use crate::layout::plan::{
+use crate::log;
+use crate::tui::layout::base_layout::BaseLayout;
+use crate::tui::layout::layout_tree::HunkNode;
+use crate::tui::layout::notes::{NoteOverlay, NoteOverlayRequest};
+use crate::tui::layout::plan::{
     plan_row_index_for_context, plan_row_to_render_rows, row_context_for_plan_row,
 };
-use crate::layout::primitives::{
+use crate::tui::layout::primitives::{
     HunkRange, LayoutPlan, LayoutRowLocation, NoteInsertion, RenderRow,
 };
-use crate::layout::window::{LoadedHunkLimits, LoadedHunkWindowRequest, apply_loaded_hunk_window};
-use crate::log;
+use crate::tui::layout::window::{
+    LoadedHunkLimits, LoadedHunkWindowRequest, apply_loaded_hunk_window,
+};
 
 mod base_layout;
 mod hunk_load_plan;
