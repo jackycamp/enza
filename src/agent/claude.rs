@@ -9,7 +9,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::agent::ProviderOutput;
-use crate::note::{AgentFailure, AgentFailureKind};
+use crate::core::note::{AgentFailure, AgentFailureKind};
 
 pub(super) fn command(repo_root: &Path, session_id: Option<&str>) -> Command {
     let mut command = Command::new("claude");

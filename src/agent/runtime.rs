@@ -17,7 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::agent::{ProviderOutput, claude, codex};
-use crate::note::{AgentFailure, AgentFailureKind, AgentProvider, NoteId, RunId};
+use crate::core::note::{AgentFailure, AgentFailureKind, AgentProvider, NoteId, RunId};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_RESPONSE_CHARS: usize = 64_000;
